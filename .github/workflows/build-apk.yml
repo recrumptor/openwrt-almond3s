@@ -47,6 +47,7 @@ jobs:
             *.tar.zst) tar --use-compress-program=unzstd -xf "${{ steps.sdk.outputs.file }}" ;;
             *.tar.xz)  tar -xJf "${{ steps.sdk.outputs.file }}" ;;
           esac
+          rm -f "${{ steps.sdk.outputs.file }}"
           mv openwrt-sdk-* sdk
 
       - name: Add this repo as a local feed
