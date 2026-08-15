@@ -1,0 +1,87 @@
+name: Build OpenWrt .apk packages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+env:
+  OPENWRT_VERSION: "25.12.5"
+  OPENWRT_TARGET: "ramips"
+  OPENWRT_SUBTARGET: "mt7621"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout feed repo (this repo)
+        uses: actions/checkout@v4
+        with:
+          path: feed-src
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev zlib1g-dev \
+            gawk git gettext libssl-dev xsltproc rsync wget unzip python3 \
+            zstd file
+
+      - name: Locate and download matching OpenWrt SDK
+        id: sdk
+        run: |
+          BASE="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${OPENWRT_TARGET}/${OPENWRT_SUBTARGET}"
+          # The exact SDK filename embeds the gcc/libc version, so resolve it
+          # dynamically from the release's checksum manifest instead of guessing it.
+          SDK_FILE=$(curl -fsSL "${BASE}/sha256sums" | awk '{print $2}' | sed 's/^\*//' | grep -E '^openwrt-sdk-.*\.tar\.(zst|xz)$' | head -n1)
+          if [ -z "$SDK_FILE" ]; then
+            echo "Could not find an SDK archive for ${OPENWRT_VERSION}/${OPENWRT_TARGET}/${OPENWRT_SUBTARGET}" >&2
+            exit 1
+          fi
+          echo "url=${BASE}/${SDK_FILE}" >> "$GITHUB_OUTPUT"
+          echo "file=${SDK_FILE}" >> "$GITHUB_OUTPUT"
+
+      - name: Download and extract SDK
+        run: |
+          wget -q "${{ steps.sdk.outputs.url }}"
+          case "${{ steps.sdk.outputs.file }}" in
+            *.tar.zst) tar --use-compress-program=unzstd -xf "${{ steps.sdk.outputs.file }}" ;;
+            *.tar.xz)  tar -xJf "${{ steps.sdk.outputs.file }}" ;;
+          esac
+          mv openwrt-sdk-* sdk
+
+      - name: Add this repo as a local feed
+        working-directory: sdk
+        run: |
+          echo "src-link almond3s ${{ github.workspace }}/feed-src" >> feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a -p almond3s
+
+      - name: Configure packages to build
+        working-directory: sdk
+        run: |
+          cat <<'EOF' >> .config
+          CONFIG_PACKAGE_kmod-lcd-almond3s=m
+          CONFIG_PACKAGE_lcd-ui-almond3s=y
+          EOF
+          make defconfig
+
+      - name: Build packages
+        working-directory: sdk
+        run: |
+          make -j"$(nproc)" \
+            package/feeds/almond3s/lcd-almond3s/compile \
+            package/feeds/almond3s/lcd-ui-almond3s/compile \
+            V=s
+
+      - name: Collect .apk files
+        run: |
+          mkdir -p out
+          find sdk/bin/packages -name '*.apk' -exec cp {} out/ \;
+          ls -la out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: almond3s-apk-packages
+          path: out/*.apk
+          if-no-files-found: error
