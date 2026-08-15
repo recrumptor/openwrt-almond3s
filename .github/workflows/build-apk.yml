@@ -77,8 +77,18 @@ jobs:
       - name: Collect .apk files
         run: |
           mkdir -p out
-          find sdk/bin/packages -name '*.apk' -exec cp {} out/ \;
+          # kmod-* packages land under bin/targets/<target>/<subtarget>/packages/
+          # (kernel/vermagic-specific), everything else under bin/packages/<arch>/<feed>/ —
+          # search both, but only pull out our two packages, not dependencies.
+          find sdk/bin -name 'kmod-lcd-almond3s-*.apk' -exec cp {} out/ \;
+          find sdk/bin -name 'lcd-ui-almond3s-*.apk' -exec cp {} out/ \;
+          echo "Collected packages:"
           ls -la out
+          for pkg in kmod-lcd-almond3s lcd-ui-almond3s; do
+            if ! ls out/${pkg}-*.apk >/dev/null 2>&1; then
+              echo "::warning::${pkg}-*.apk not found — check the compile log above for errors"
+            fi
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
