@@ -3,7 +3,16 @@ name: Build OpenWrt .apk packages
 on:
   push:
     branches: [master]
-  workflow_dispatch: {}
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag to create a release for (e.g. v1.6.0). Leave empty to just build, no release."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
 
 env:
   OPENWRT_VERSION: "25.12.5"
@@ -96,3 +105,26 @@ jobs:
           name: almond3s-apk-packages
           path: out/*.apk
           if-no-files-found: error
+
+      - name: Determine release tag
+        id: release
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            echo "create=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            echo "tag=${{ github.event.inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+            echo "create=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "create=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub release with the two .apk files
+        if: steps.release.outputs.create == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: ${{ steps.release.outputs.tag }}
+          files: |
+            out/kmod-lcd-almond3s-*.apk
+            out/lcd-ui-almond3s-*.apk
