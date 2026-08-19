@@ -397,6 +397,17 @@ let TR_RU = {
     "Blink on SMS": "Мигать при SMS",
     "Widgets": "Виджеты",
     "Air": "Эфир",
+    "Peers": "Соседи",
+    "Signal": "Сигнал",
+    "Key": "Ключ",
+    "plain": "без шифра",
+    "ms": "мс",
+    "heard": "услышан",
+    "link": "линк",
+    "Beacon": "Маячок",
+    "every 10 sec": "раз в 10 с",
+    "no peers heard": "соседей не слышно",
+    "beacon off": "маячок выключен",
     "Networks": "Сети",
     "Scanning...": "Сканирую...",
     "quietest": "тише всего",
@@ -5642,7 +5653,75 @@ function zig_cfg() {
         ch:    clampi(int(+g("channel", 15)), 11, 26),
         power: clampi(int(+g("power", 8)), -8, 20),
         key:   g("key", "30313233343536373839404142434445"),
+        beacon: g("beacon", "0") == "1",
     };
+}
+
+let ZIG_PEERS = "/tmp/lcd_zig_peers.json";
+
+function zig_name() {
+    let v = ucur ? ucur.get("system", "@system[0]", "hostname") : null;
+    return (v == null || v == "") ? "almond" : v;
+}
+
+let ZIG_TELE = "/tmp/lcd_zig_tele.json";
+
+// Телеметрия для маячка: плоский набор чисел, который он упакует в эфир.
+// Считает интерфейс - у него уже всё разобрано, а в C дублировать разбор
+// незачем. Имена полей те же, что в контракте схемы.
+function zig_tele_write() {
+    let d = st.data;
+    if (!d) return;
+    let bt = d.battery, tot = int(+(d.mem_total_mb ?? 0)), fr = int(+(d.mem_free_mb ?? 0));
+    let stot = int(+(d.storage?.total_kb ?? 0)), sfr = int(+(d.storage?.free_kb ?? 0));
+    let rx = length(hist.rx) > 0 ? hist.rx[length(hist.rx) - 1] : 0;
+    let tx = length(hist.tx) > 0 ? hist.tx[length(hist.tx) - 1] : 0;
+    let nc = type(d.wifi?.clients) == "array" ? length(d.wifi.clients) : 0;
+    let sp = int(+(d.lte?.signal ?? 0));
+    if (sp <= 0) {
+        let r = int(+(d.lte?.rsrp ?? 0));
+        sp = r != 0 ? clampi(int(MET.rsrp.bar(r)), 0, 100) : 0;
+    }
+    let tele = {
+        sig:  clampi(sp, 0, 100),
+        rsrp: int(+(d.lte?.rsrp ?? 0)),
+        batt: int(+(bt?.percent ?? -1)),
+        chg:  bt?.charging ? 1 : 0,
+        cpu:  int(+(d.cpu_busy ?? 0)),
+        mem:  tot > 0 ? int((tot - fr) * 100 / tot) : 0,
+        disk: stot > 0 ? int((stot - sfr) * 100 / stot) : 0,
+        up:   int(int(+(d.uptime ?? 0)) / 60),
+        wifi: nc,
+        ping: int(+(d.ping?.google_ms ?? -1)),
+        sms:  int(+(d.sms_new ?? 0)),
+        rx:   int(rx),
+        tx:   int(tx),
+        temp: int(+(d.lte?.temp ?? 0)),
+        vpn:  st.vpn_on ? 1 : 0,
+    };
+    fs.writefile(ZIG_TELE, sprintf("%J\n", tele));
+}
+
+function zig_beacon_stop() {
+    system("killall almond3s-zig >/dev/null 2>&1");
+}
+
+let ZIG_KEYFILE = "/tmp/.zig_key";
+
+function zig_beacon_start() {
+    let c = zig_cfg();
+    if (!c.beacon) return;
+    zig_beacon_stop();
+    // Ключ эфира кладём в файл, а не в аргументы: аргументы видно всем в списке
+    // процессов. Пустой ключ - маячок работает открытым текстом.
+    if (length(c.key) >= 32) {
+        fs.writefile(ZIG_KEYFILE, substr(c.key, 0, 32) + "\n");
+        system("chmod 600 " + ZIG_KEYFILE + " 2>/dev/null");
+    } else {
+        fs.unlink(ZIG_KEYFILE);
+    }
+    system(sprintf("setsid %s beacon %d 10 %s >/dev/null 2>&1 </dev/null &",
+                   ZIG_BIN, c.ch, zig_name()));
 }
 
 function zig_set(k, v) {
@@ -5687,12 +5766,16 @@ function zig_btn(i) {
 function draw_zigbee_page() {
     lcd_clear(C.bg);
     draw_header(tr("Zigbee"));
-    st.zig ??= { mode: "escan" };
-    let z = st.zig, cfg = zig_cfg();
+    let cfg = zig_cfg();
+    st.zig ??= { mode: cfg.beacon ? "peers" : "escan" };
+    let z = st.zig;
 
     let info = zig_json(ZIG_INFO);
+    let pj = zig_json(ZIG_PEERS);
+    // Пока работает маячок, опросить чип нельзя - порт занят. Тогда берём
+    // строку, которую маячок сам записал при старте.
     let head = info?.ok ? sprintf("EM357  EZSP v%d  %s", info.ezsp, info.stack ?? "")
-                        : tr("chip silent");
+             : (pj?.chip ?? tr("chip silent"));
     lcd_rect(GX, GY, GW, 26, C.widget);
     lcd_rect(GX, GY, 3, 26, info?.ok ? C.green : C.dim);
     lcd_text(GX + 12, GY + 9, head, C.white, C.widget, 1);
@@ -5702,6 +5785,7 @@ function draw_zigbee_page() {
     let ay = GY + 32, ah = BACK_Y - 44 - ay;
     lcd_rect(GX, ay, GW, ah, C.widget);
 
+    if (!zig_busy() && st.zig?.restart) { st.zig.restart = false; zig_beacon_start(); }
     if (zig_busy()) {
         lcd_text(GX + int((GW - tlen(tr("Scanning...")) * 12) / 2), ay + int(ah / 2) - 7,
                  tr("Scanning..."), C.cyan, C.widget, 2);
@@ -5736,26 +5820,34 @@ function draw_zigbee_page() {
                      best.ch, best.rssi), C.green, C.widget, 1);
         }
     } else {
-        let d = zig_json(ZIG_ASCAN);
-        let nets = type(d?.networks) == "array" ? d.networks : [];
-        lcd_text(GX + 12, ay + 6, tr("Networks"), C.gray, C.widget, 1);
-        if (length(nets) == 0) {
-            lcd_text(GX + 12, ay + 24, tr("no networks found"), C.dim, C.widget, 1);
+        let d = zig_json(ZIG_PEERS);
+        let peers = type(d?.peers) == "array" ? d.peers : [];
+        let on = zig_cfg().beacon;
+        lcd_text(GX + 12, ay + 6, on ? sprintf("%s: %s, %s %d", tr("Beacon"), d?.me ?? zig_name(),
+                 tr("Channel"), d?.ch ?? zig_cfg().ch) : tr("beacon off"),
+                 on ? C.green : C.dim, C.widget, 1);
+        if (length(peers) == 0) {
+            lcd_text(GX + 12, ay + 26, on ? tr("no peers heard") : tr("off"), C.dim, C.widget, 2);
         } else {
-            for (let i = 0; i < length(nets) && i < 5; i++) {
-                let n = nets[i], y = ay + 22 + i * 18;
-                lcd_text(GX + 12, y, sprintf("PAN %04X", n.pan), C.white, C.widget, 1);
-                lcd_text(GX + 90, y, sprintf("%s %d", tr("Channel"), n.ch), C.gray, C.widget, 1);
-                lcd_text(GX + 170, y, sprintf("LQI %d", n.lqi), C.gray, C.widget, 1);
-                lcd_text(GX + 240, y, sprintf("%d dBm", n.rssi), C.cyan, C.widget, 1);
+            for (let i = 0; i < length(peers) && i < 5; i++) {
+                let n = peers[i], y = ay + 24 + i * 20;
+                let fresh = int(+(n.age ?? 999)) < 30;
+                lcd_text(GX + 12, y, tcut(n.name ?? "?", 14), fresh ? C.white : C.dim, C.widget, 1);
+                let bw = 60, fill = clampi(int(+(n.lqi ?? 0)) * bw / 255, 0, bw);
+                lcd_rect(GX + 110, y, bw, 7, C.btn);
+                if (fill > 0) lcd_rect(GX + 110, y, fill, 7, fresh ? C.green : C.dim);
+                lcd_text(GX + 180, y, sprintf("%d dBm", int(+(n.rssi ?? 0))),
+                         fresh ? C.cyan : C.dim, C.widget, 1);
+                lcd_text(GX + 250, y, sprintf("%d %s", int(+(n.age ?? 0)), tr("sec")),
+                         C.dim, C.widget, 1);
             }
         }
     }
 
-    let labels = [ tr("Air"), tr("Networks"), tr("Settings") ];
+    let labels = [ tr("Air"), tr("Peers"), tr("Settings") ];
     for (let i = 0; i < 3; i++) {
         let b = zig_btn(i);
-        let on = (i == 0 && z.mode == "escan") || (i == 1 && z.mode == "ascan");
+        let on = (i == 0 && z.mode == "escan") || (i == 1 && z.mode == "peers");
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
         lcd_rect(b.x, b.y, 3, b.h, on ? C.green : C.border);
         lcd_text(b.x + int((b.w - tlen(labels[i]) * 6) / 2), b.y + 12, labels[i],
@@ -5766,15 +5858,71 @@ function draw_zigbee_page() {
     lcd_flush();
 }
 
+function zig_peer_row(i) {
+    return { x: GX, y: GY + 32 + i * 20, w: GW, h: 18 };
+}
+
+function draw_zigpeer_page() {
+    lcd_clear(C.bg);
+    let d = zig_json(ZIG_PEERS);
+    let peers = type(d?.peers) == "array" ? d.peers : [];
+    let n = peers[st.zig?.peer ?? 0];
+    draw_header(tr("Peers"));
+    if (n == null) {
+        lcd_text(GX + 12, GY + 20, tr("no peers heard"), C.dim, C.bg, 2);
+        draw_back();
+        lcd_flush();
+        return;
+    }
+
+    let hb = { x: GX, y: GY, w: GW, h: 26 };
+    lcd_rect(hb.x, hb.y, hb.w, hb.h, C.widget);
+    lcd_rect(hb.x, hb.y, 3, hb.h, int(+(n.age ?? 99)) < 30 ? C.green : C.dim);
+    lcd_text(hb.x + 12, hb.y + 9, tcut(n.name ?? "?", 16), C.white, C.widget, 1);
+    lcd_text(hb.x + hb.w - 11 - tlen(sprintf("%s %d dBm  LQI %d  %d %s", tr("link"),
+             int(+(n.rssi ?? 0)), int(+(n.lqi ?? 0)), int(+(n.age ?? 0)), tr("sec"))) * 6,
+             hb.y + 9, sprintf("%s %d dBm  LQI %d  %d %s", tr("link"), int(+(n.rssi ?? 0)),
+             int(+(n.lqi ?? 0)), int(+(n.age ?? 0)), tr("sec")), C.gray, C.widget, 1);
+
+    let m = n.m ?? {};
+    let cells = [
+        [ tr("Signal"), m.sig != null ? sprintf("%d%%", int(+m.sig)) : "--",
+          m.rsrp != null ? sprintf("%d dBm", int(+m.rsrp)) : "" ],
+        [ tr("Battery"), m.batt != null ? sprintf("%d%%", int(+m.batt)) : "--",
+          int(+(m.chg ?? 0)) == 1 ? tr("charging") : tr("on battery") ],
+        [ "CPU", m.cpu != null ? sprintf("%d%%", int(+m.cpu)) : "--",
+          m.mem != null ? sprintf("%s %d%%", tr("Memory"), int(+m.mem)) : "" ],
+        [ tr("Ping"), m.ping != null ? sprintf("%d %s", int(+m.ping), tr("ms")) : "--",
+          m.temp != null ? sprintf("%d°C", int(+m.temp)) : "" ],
+        [ tr("Uptime short"), m.up != null ? fmt_uptime(int(+m.up) * 60) : "--",
+          m.disk != null ? sprintf("%s %d%%", tr("Disk"), int(+m.disk)) : "" ],
+        [ "VPN", int(+(m.vpn ?? 0)) == 1 ? tr("on") : tr("off"),
+          m.wifi != null ? sprintf("Wi-Fi %d", int(+m.wifi)) : "" ],
+    ];
+    let cw = int((GW - GG) / 2);
+    for (let i = 0; i < length(cells); i++) {
+        let cx = GX + (i % 2) * (cw + GG), cy = GY + 32 + int(i / 2) * 40;
+        lcd_rect(cx, cy, cw, 36, C.widget);
+        lcd_rect(cx, cy, 3, 36, C.cyan);
+        lcd_text(cx + 12, cy + 5, cells[i][0], C.dim, C.widget, 1);
+        lcd_text(cx + 12, cy + 18, cells[i][1], C.white, C.widget, 2);
+        if (cells[i][2] != "")
+            lcd_text(cx + cw - 11 - tlen(cells[i][2]) * 6, cy + 22, cells[i][2],
+                     C.gray, C.widget, 1);
+    }
+    draw_back();
+    lcd_flush();
+}
+
 let ZIG_POWERS = [ -8, 0, 3, 8, 20 ];
 
 function zigset_row(i) {
-    return { x: GX, y: GY + i * 34, w: GW, h: 30 };
+    return { x: GX, y: GY + i * 27, w: GW, h: 24 };
 }
 
 function zigset_pm(i, plus) {
     let r = zigset_row(i);
-    return { x: plus ? r.x + r.w - 40 : r.x + r.w - 84, y: r.y + 2, w: 38, h: 26 };
+    return { x: plus ? r.x + r.w - 40 : r.x + r.w - 84, y: r.y + 1, w: 38, h: 24 };
 }
 
 function zigset_act(i) {
@@ -5791,12 +5939,20 @@ function draw_zigset_page() {
         [ tr("Channel"), sprintf("%d", c.ch) ],
         [ tr("TX power"), sprintf("%d dBm", c.power) ],
     ];
+    let bb = zigset_row(3);
+    lcd_rect(bb.x, bb.y, bb.w, bb.h, C.widget);
+    lcd_rect(bb.x, bb.y, 3, bb.h, c.beacon ? C.green : C.dim);
+    lcd_text(bb.x + 12, bb.y + 9, tr("Beacon"), C.gray, C.widget, 1);
+    lcd_text(bb.x + 100, bb.y + 6, c.beacon ? tr("on") : tr("off"),
+             c.beacon ? C.green : C.gray, C.widget, 2);
+    lcd_text(bb.x + bb.w - 11 - tlen(tr("every 10 sec")) * 6, bb.y + 9,
+             tr("every 10 sec"), C.dim, C.widget, 1);
     for (let i = 0; i < length(rows); i++) {
         let r = zigset_row(i);
         lcd_rect(r.x, r.y, r.w, r.h, C.widget);
         lcd_rect(r.x, r.y, 3, r.h, C.cyan);
-        lcd_text(r.x + 12, r.y + 11, rows[i][0], C.gray, C.widget, 1);
-        lcd_text(r.x + 100, r.y + 8, rows[i][1], C.white, C.widget, 2);
+        lcd_text(r.x + 12, r.y + 9, rows[i][0], C.gray, C.widget, 1);
+        lcd_text(r.x + 100, r.y + 6, rows[i][1], C.white, C.widget, 2);
         let m = zigset_pm(i, false), pl = zigset_pm(i, true);
         lcd_rect(m.x, m.y, m.w, m.h, C.btn);
         lcd_text(m.x + 15, m.y + 6, "-", C.accent, C.btn, 2);
@@ -5804,15 +5960,25 @@ function draw_zigset_page() {
         lcd_text(pl.x + 13, pl.y + 6, "+", C.accent, C.btn, 2);
     }
 
+    // Отпечаток ключа: по нему видно, совпадает ли он на двух аппаратах,
+    // и при этом сам ключ на экран не выводится.
+    let kb = zigset_row(4);
+    let kt = length(c.key) >= 32
+        ? sprintf("%s…%s", uc(substr(c.key, 0, 4)), uc(substr(c.key, 28, 4)))
+        : tr("plain");
+    lcd_rect(kb.x, kb.y, kb.w, kb.h, C.widget);
+    lcd_rect(kb.x, kb.y, 3, kb.h, length(c.key) >= 32 ? C.cyan : C.dim);
+    lcd_text(kb.x + 12, kb.y + 9, tr("Key"), C.gray, C.widget, 1);
+    lcd_text(kb.x + 100, kb.y + 6, kt, C.white, C.widget, 2);
+
     let stt = zig_json("/tmp/lcd_zig_state.json");
-    if (stt != null && st.zig?.form_msg && (time() - (st.zig.msg_ts ?? 0)) > 3)
+    if (st.zig?.form_msg && stt != null && (time() - (st.zig.msg_ts ?? 0)) > 3)
         st.zig.form_msg = null;
-    let hint = sprintf("%s: %s", tr("own network"), tr("off"));
-    if (st.zig?.form_msg) hint = st.zig.form_msg;
-    else if (stt?.state == 2)
-        hint = sprintf("%s: PAN %04X, %s %d, %s", tr("own network"), stt.pan,
-                       tr("Channel"), stt.ch, stt.node == 1 ? "координатор" : "узел");
-    lcd_text(GX + 12, GY + 3 * 34 + 8, hint, C.dim, C.bg, 1);
+    let hint = st.zig?.form_msg ?? (stt?.state == 2
+        ? sprintf("%s %04X, %s", tr("own network"), stt.pan,
+                  stt.node == 1 ? "координатор" : "узел")
+        : sprintf("%s: %s", tr("own network"), tr("off")));
+    lcd_text(GX + 12, GY + 5 * 27 + 4, hint, C.dim, C.bg, 1);
 
     let names = [ tr("Form network"), tr("Leave network") ];
     for (let i = 0; i < 2; i++) {
@@ -7486,14 +7652,18 @@ function page_sig() {
     let nc = type(d.wifi?.clients) == "array" ? length(d.wifi.clients) : 0;
     let base = sprintf("%s|%d|%s|%d|%s", st.page, st.mpg, clock_str(),
                        int(+(d.sms_new ?? 0)), uplink_kind());
+    if (st.page == "zigpeer") {
+        let f = fs.stat(ZIG_PEERS);
+        return base + sprintf("|%d|%d", f ? f.mtime : 0, st.zig?.peer ?? 0);
+    }
     if (st.page == "zigset") {
         let f = fs.stat("/tmp/lcd_zig_state.json");
         return base + sprintf("|%d|%d", f ? f.mtime : 0, st.zig?.form_msg ? 1 : 0);
     }
     if (st.page == "zigbee") {
-        let e = fs.stat(ZIG_ESCAN), a = fs.stat(ZIG_ASCAN);
+        let e = fs.stat(ZIG_ESCAN), pf = fs.stat(ZIG_PEERS);
         return base + sprintf("|%s|%d|%d|%d", st.zig?.mode ?? "escan",
-                              zig_busy() ? 1 : 0, e ? e.mtime : 0, a ? a.mtime : 0);
+                              zig_busy() ? 1 : 0, e ? e.mtime : 0, pf ? pf.mtime : 0);
     }
     switch (st.page) {
     case "dashboard":
@@ -7630,6 +7800,7 @@ function draw_current() {
     case "iconedit":  draw_iconedit_page(); break;
     case "zigbee":    draw_zigbee_page(); break;
     case "zigset":    draw_zigset_page(); break;
+    case "zigpeer":   draw_zigpeer_page(); break;
     case "games":     draw_games_page(); break;
     case "gset":      draw_gset_page(); break;
     case "gqr":       draw_gqr_page(); break;
@@ -8660,6 +8831,18 @@ function handle_touch(tx, ty, tmove) {
 
     if (st.page == "zigbee" && ty < BACK_Y) {
         st.zig ??= { mode: "escan" };
+        if (st.zig.mode == "peers") {
+            let d = zig_json(ZIG_PEERS);
+            let peers = type(d?.peers) == "array" ? d.peers : [];
+            let ay = GY + 32;
+            for (let i = 0; i < length(peers) && i < 5; i++) {
+                if (ty >= ay + 20 + i * 20 - 6 && ty < ay + 20 + i * 20 + 14) {
+                    st.zig.peer = i;
+                    go_page("zigpeer");
+                    return;
+                }
+            }
+        }
         for (let i = 0; i < 3; i++) {
             let b = zig_btn(i);
             if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
@@ -8669,8 +8852,12 @@ function handle_touch(tx, ty, tmove) {
                 go_page("zigset");
                 return;
             }
-            st.zig.mode = (i == 0) ? "escan" : "ascan";
-            zig_run(st.zig.mode, i == 0 ? ZIG_ESCAN : ZIG_ASCAN, i == 0 ? "3" : "5");
+            if (i == 1) { st.zig.mode = "peers"; draw_zigbee_page(); return; }
+            st.zig.mode = "escan";
+            // Скан держит порт, поэтому маячок на время глушим и поднимаем после.
+            zig_beacon_stop();
+            zig_run("escan", ZIG_ESCAN, "3");
+            st.zig.restart = true;
             draw_zigbee_page();
             return;
         }
@@ -8695,6 +8882,16 @@ function handle_touch(tx, ty, tmove) {
             }
             draw_zigset_page();
             return;
+        }
+        {
+            let bb = zigset_row(3);
+            if (in_rect(tx, ty, bb.x, bb.y, bb.w, bb.h)) {
+                let on = !c.beacon;
+                zig_set("beacon", on ? 1 : 0);
+                if (on) zig_beacon_start(); else zig_beacon_stop();
+                draw_zigset_page();
+                return;
+            }
         }
         for (let i = 0; i < 2; i++) {
             let b = zigset_act(i);
@@ -10179,6 +10376,18 @@ function main() {
             refresh_data();
             st.alarm_on = alarm_is_on();   // статус-иконка будильника
             night_tick();
+            if (zig_cfg().beacon) {
+                zig_tele_write();
+                // Сторож маячка: он же и первый запуск. На старте службы uci
+                // ещё не прочитан, а сам процесс может и умереть - смотрим по
+                // свежести файла соседей, это дешевле опроса процессов.
+                st.zig_tick = (st.zig_tick ?? 99) + 1;
+                if (st.zig_tick >= 8) {
+                    st.zig_tick = 0;
+                    let f = fs.stat(ZIG_PEERS);
+                    if (!f || (time() - f.mtime) > 20) zig_beacon_start();
+                }
+            }
             st.vpn_on = clash_running();
             // Матрица-заставка: снизу живой logread (kmsg после буста молчит).
             // Срезаем дату+facility, режем по ширине, фоном чтоб не блокировать.

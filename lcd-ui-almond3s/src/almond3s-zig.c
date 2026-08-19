@@ -23,6 +23,8 @@
 #include <sys/select.h>
 #include <time.h>
 #include <sys/file.h>
+#include <signal.h>
+#include <mbedtls/aes.h>
 
 static int fd;
 static unsigned char rx_ack, tx_num;
@@ -77,11 +79,13 @@ static void mask_data(unsigned char *d, int n)
 
 static void ezsp_cmd(unsigned char frame_id, const unsigned char *par, int parlen)
 {
+    if (parlen < 0) parlen = 0;
+    if (parlen > 160) parlen = 160;
     static unsigned char seq;
-    unsigned char body[128];
+    unsigned char body[192];
     int n = 0;
     body[n++] = (unsigned char)(((tx_num & 7) << 4) | (rx_ack & 7));
-    unsigned char pl[64];
+    unsigned char pl[176];
     int pn = 0;
     pl[pn++] = seq++;
     pl[pn++] = 0x00;
@@ -145,6 +149,248 @@ static int frame_body(const unsigned char *f, int m, const unsigned char **body)
         }
     }
     return 0;
+}
+
+/* --- Защита эфира ---------------------------------------------------------
+ * По образцу Zigbee: полезная часть шифруется AES-CCM* на общем 128-битном
+ * ключе (у нас он же задаётся в настройках), к кадру добавляется счётчик и
+ * четырёхбайтовая подпись. Соль (nonce) собирается как в стандарте - из адреса
+ * отправителя, счётчика и байта уровня защиты. Заголовок MAC и счётчик идут
+ * открытым текстом, но подписаны: подменить их не выйдет.
+ *
+ * Без ключа маячок работает как раньше, открытым текстом - чтобы аппарат без
+ * настройки не выпадал из сети соседей молча.
+ */
+#define ZSEC_PLAIN 0x00
+#define ZSEC_CCM   0x01
+#define ZSEC_MIC   4
+
+static unsigned char zkey[16];
+static int zkey_ok;
+
+static void zkey_load(void)
+{
+    const char *path = getenv("ZIG_KEY") ? getenv("ZIG_KEY") : "/tmp/.zig_key";
+    char hex[64];
+    FILE *f = fopen(path, "r");
+    zkey_ok = 0;
+    if (!f) return;
+    if (fgets(hex, sizeof hex, f) && strlen(hex) >= 32) {
+        for (int i = 0; i < 16; i++) {
+            char b[3] = { hex[i * 2], hex[i * 2 + 1], 0 };
+            char *end;
+            long v = strtol(b, &end, 16);
+            if (end != b + 2) { fclose(f); return; }
+            zkey[i] = (unsigned char)v;
+        }
+        zkey_ok = 1;
+    }
+    fclose(f);
+}
+
+static void zsec_nonce(unsigned char *n, unsigned int src, unsigned int ctr)
+{
+    memset(n, 0, 13);
+    n[0] = (unsigned char)(src & 0xFF);
+    n[1] = (unsigned char)((src >> 8) & 0xFF);
+    n[2] = (unsigned char)(ctr & 0xFF);
+    n[3] = (unsigned char)((ctr >> 8) & 0xFF);
+    n[4] = (unsigned char)((ctr >> 16) & 0xFF);
+    n[5] = (unsigned char)((ctr >> 24) & 0xFF);
+    n[12] = ZSEC_CCM;
+}
+
+/* CCM* своими руками: в сборке mbedtls на роутере есть только AES, а CCM -
+   это и есть CBC-MAC поверх AES для подписи плюс CTR для шифра. Параметры как
+   в Zigbee: длина поля счётчика 2 байта (значит соль 13 байт), подпись 4. */
+static void ccm_block(mbedtls_aes_context *a, unsigned char *x, const unsigned char *b)
+{
+    unsigned char t[16];
+    for (int i = 0; i < 16; i++) t[i] = x[i] ^ b[i];
+    mbedtls_aes_crypt_ecb(a, MBEDTLS_AES_ENCRYPT, t, x);
+}
+
+static void ccm_tag(mbedtls_aes_context *a, const unsigned char *nonce,
+                    const unsigned char *aad, int aadlen,
+                    const unsigned char *msg, int mlen, unsigned char *tag)
+{
+    unsigned char x[16] = {0}, b[16];
+    int i;
+
+    b[0] = (unsigned char)((aadlen ? 0x40 : 0x00) | (((4 - 2) / 2) << 3) | (2 - 1));
+    memcpy(b + 1, nonce, 13);
+    b[14] = (unsigned char)((mlen >> 8) & 0xFF);
+    b[15] = (unsigned char)(mlen & 0xFF);
+    ccm_block(a, x, b);
+
+    if (aadlen) {
+        int off = 0;
+        memset(b, 0, 16);
+        b[0] = (unsigned char)((aadlen >> 8) & 0xFF);
+        b[1] = (unsigned char)(aadlen & 0xFF);
+        for (i = 0; i < 14 && i < aadlen; i++) b[2 + i] = aad[i];
+        ccm_block(a, x, b);
+        off = i;
+        while (off < aadlen) {
+            memset(b, 0, 16);
+            for (i = 0; i < 16 && off + i < aadlen; i++) b[i] = aad[off + i];
+            ccm_block(a, x, b);
+            off += i;
+        }
+    }
+    for (int off = 0; off < mlen; off += 16) {
+        memset(b, 0, 16);
+        for (i = 0; i < 16 && off + i < mlen; i++) b[i] = msg[off + i];
+        ccm_block(a, x, b);
+    }
+    memcpy(tag, x, ZSEC_MIC);
+}
+
+static void ccm_ctr(mbedtls_aes_context *a, const unsigned char *nonce,
+                    unsigned char *data, int len, unsigned char *s0)
+{
+    unsigned char ctr[16], sblk[16];
+    ctr[0] = (unsigned char)(2 - 1);
+    memcpy(ctr + 1, nonce, 13);
+    ctr[14] = 0; ctr[15] = 0;
+    if (s0) {
+        mbedtls_aes_crypt_ecb(a, MBEDTLS_AES_ENCRYPT, ctr, sblk);
+        memcpy(s0, sblk, 16);
+    }
+    for (int off = 0, blk = 1; off < len; off += 16, blk++) {
+        ctr[14] = (unsigned char)((blk >> 8) & 0xFF);
+        ctr[15] = (unsigned char)(blk & 0xFF);
+        mbedtls_aes_crypt_ecb(a, MBEDTLS_AES_ENCRYPT, ctr, sblk);
+        for (int i = 0; i < 16 && off + i < len; i++) data[off + i] ^= sblk[i];
+    }
+}
+
+static int zsec_seal(unsigned char *buf, int len, const unsigned char *aad, int aadlen,
+                     unsigned int src, unsigned int ctr, unsigned char *tag)
+{
+    mbedtls_aes_context a;
+    unsigned char nonce[13], s0[16], t[ZSEC_MIC];
+    if (!zkey_ok) return -1;
+    zsec_nonce(nonce, src, ctr);
+    mbedtls_aes_init(&a);
+    if (mbedtls_aes_setkey_enc(&a, zkey, 128) != 0) { mbedtls_aes_free(&a); return -1; }
+    ccm_tag(&a, nonce, aad, aadlen, buf, len, t);
+    ccm_ctr(&a, nonce, buf, len, s0);
+    for (int i = 0; i < ZSEC_MIC; i++) tag[i] = t[i] ^ s0[i];
+    mbedtls_aes_free(&a);
+    return 0;
+}
+
+static int zsec_open(unsigned char *buf, int len, const unsigned char *aad, int aadlen,
+                     unsigned int src, unsigned int ctr, const unsigned char *tag)
+{
+    mbedtls_aes_context a;
+    unsigned char nonce[13], s0[16], t[ZSEC_MIC];
+    if (!zkey_ok) return -1;
+    zsec_nonce(nonce, src, ctr);
+    mbedtls_aes_init(&a);
+    if (mbedtls_aes_setkey_enc(&a, zkey, 128) != 0) { mbedtls_aes_free(&a); return -1; }
+    ccm_ctr(&a, nonce, buf, len, s0);
+    ccm_tag(&a, nonce, aad, aadlen, buf, len, t);
+    mbedtls_aes_free(&a);
+    for (int i = 0; i < ZSEC_MIC; i++)
+        if ((unsigned char)(t[i] ^ s0[i]) != tag[i]) return -2;
+    return 0;
+}
+
+/* --- Телеметрия в эфир ---------------------------------------------------
+ * Кладём поля записями [id, длина, значение] - компактно, но с однозначным
+ * соответствием ZCL: у каждого id в контракте прописан свой кластер и атрибут
+ * (батарея - 0x0001/0x0021, температура - 0x0402/0x0000, остальное в
+ * производительском 0xFC00). Если чип однажды заговорит по стандарту, отчёты
+ * соберутся из тех же записей без смены формата.
+ */
+#define T_SIG 0x01
+#define T_RSRP 0x02
+#define T_BATT 0x03
+#define T_CHG 0x04
+#define T_CPU 0x05
+#define T_MEM 0x06
+#define T_DISK 0x07
+#define T_UP 0x08
+#define T_WIFI 0x09
+#define T_PING 0x0A
+#define T_SMS 0x0B
+#define T_RX 0x0C
+#define T_TX 0x0D
+#define T_TEMP 0x0E
+#define T_VPN 0x0F
+
+static const struct { unsigned char id; const char *key; int width; } TELE[] = {
+    { T_SIG, "sig", 1 }, { T_RSRP, "rsrp", 1 }, { T_BATT, "batt", 1 },
+    { T_CHG, "chg", 1 }, { T_CPU, "cpu", 1 }, { T_MEM, "mem", 1 },
+    { T_DISK, "disk", 1 }, { T_UP, "up", 2 }, { T_WIFI, "wifi", 1 },
+    { T_PING, "ping", 2 }, { T_SMS, "sms", 1 }, { T_RX, "rx", 4 },
+    { T_TX, "tx", 4 }, { T_TEMP, "temp", 1 }, { T_VPN, "vpn", 1 },
+};
+
+static long jnum(const char *buf, const char *key, long dflt)
+{
+    char pat[48];
+    snprintf(pat, sizeof pat, "\"%s\":", key);
+    const char *p = strstr(buf, pat);
+    if (!p) return dflt;
+    p += strlen(pat);
+    while (*p == ' ' || *p == '"') p++;
+    return strtol(p, NULL, 10);
+}
+
+static int tele_pack(unsigned char *out, int max)
+{
+    char buf[1024];
+    const char *path = getenv("ZIG_TELE") ? getenv("ZIG_TELE") : "/tmp/lcd_zig_tele.json";
+    FILE *f = fopen(path, "r");
+    int n = 0;
+    if (!f) return 0;
+    size_t got = fread(buf, 1, sizeof buf - 1, f);
+    buf[got] = 0;
+    fclose(f);
+    for (unsigned i = 0; i < sizeof TELE / sizeof TELE[0]; i++) {
+        long v = jnum(buf, TELE[i].key, 0x7FFFFFFF);
+        if (v == 0x7FFFFFFF) continue;
+        if (n + 2 + TELE[i].width > max) break;
+        out[n++] = TELE[i].id;
+        out[n++] = (unsigned char)TELE[i].width;
+        for (int b = 0; b < TELE[i].width; b++)
+            out[n++] = (unsigned char)((v >> (8 * b)) & 0xFF);
+    }
+    return n;
+}
+
+/* Разбор принятой телеметрии в JSON для интерфейса. */
+static void tele_unpack(const unsigned char *in, int n, char *out, int max)
+{
+    int off = 0, first = 1;
+    out[0] = 0;
+    for (int i = 0; i + 2 <= n; ) {
+        int id = in[i], w = in[i + 1];
+        if (w < 1 || w > 4 || i + 2 + w > n) break;
+        long v = 0;
+        for (int b = 0; b < w; b++) v |= (long)in[i + 2 + b] << (8 * b);
+        if (w == 1 && (id == T_RSRP || id == T_TEMP)) v = (signed char)v;
+        if (w == 2 && v > 32767) v -= 65536;
+        const char *key = NULL;
+        for (unsigned k = 0; k < sizeof TELE / sizeof TELE[0]; k++)
+            if (TELE[k].id == id) key = TELE[k].key;
+        if (key)
+            off += snprintf(out + off, max - off, "%s\"%s\":%ld", first ? "" : ",", key, v),
+            first = 0;
+        i += 2 + w;
+        if (off > max - 24) break;
+    }
+}
+
+static volatile int stop_flag;
+
+static void on_term(int sig)
+{
+    (void)sig;
+    stop_flag = 1;
 }
 
 static int port_open(const char *dev)
@@ -449,7 +695,7 @@ int main(int argc, char **argv)
        networkInit - как и сканы. */
     int scanning = !strcmp(cmd, "escan") || !strcmp(cmd, "ascan")
                 || !strcmp(cmd, "tone") || !strcmp(cmd, "listen")
-                || !strcmp(cmd, "send");
+                || !strcmp(cmd, "send") || !strcmp(cmd, "beacon");
     if (!scanning) {
         init = network_init();
         /* Стеку нужно мгновение, чтобы доложить о поднятой сети. */
@@ -483,6 +729,204 @@ int main(int argc, char **argv)
                 key[i] = (unsigned char)strtol(b, NULL, 16);
             }
         form(pan, ch, pw, key);
+    } else if (!strcmp(cmd, "beacon")) {
+        /* Фоновый маячок: слушаем канал и раз в период кричим своё имя.
+           Услышанных соседей складываем в JSON для страницы «Соседи».
+           Стек не поднимаем - заводская библиотека работает только на спящем. */
+        int ch = argc > 2 ? atoi(argv[2]) : 20;
+        int period = argc > 3 ? atoi(argv[3]) : 10;
+        const char *me = argc > 4 ? argv[4] : "almond";
+        const char *out = getenv("ZIG_PEERS") ? getenv("ZIG_PEERS") : "/tmp/lcd_zig_peers.json";
+        unsigned char pl[128], d[130];
+        int r_start = -1, r_ch = -1;
+
+        signal(SIGTERM, on_term);
+        signal(SIGINT, on_term);
+        zkey_load();
+
+        d[0] = 1;
+        ezsp_cmd(0x83, d, 1);
+        for (int i = 0; i < 6; i++) {
+            int pn = ezsp_read(pl, sizeof pl, 600);
+            if (pn >= 4 && pl[2] == 0x83) { r_start = pl[3]; break; }
+        }
+        d[0] = (unsigned char)ch;
+        ezsp_cmd(0x8A, d, 1);
+        for (int i = 0; i < 6; i++) {
+            int pn = ezsp_read(pl, sizeof pl, 600);
+            if (pn >= 4 && pl[2] == 0x8A) { r_ch = pl[3]; break; }
+        }
+        if (r_start != 0 || r_ch != 0) {
+            printf("{\"ok\":0,\"start\":%d,\"channel\":%d}\n", r_start, r_ch);
+            return 1;
+        }
+
+        /* Короткий адрес выводим из имени - лишь бы аппараты отличались. */
+        unsigned int myid = 0;
+        for (const char *q = me; *q; q++) myid = myid * 31u + (unsigned char)*q;
+        myid = (myid & 0x7FFF) | 0x0001;
+
+        struct { char name[24]; int rssi, lqi; long seen; int seq; unsigned int ctr;
+                 char tele[320]; } pr[8];
+        int npr = 0;
+        memset(pr, 0, sizeof pr);
+        long last_tx = 0, last_save = 0;
+        int seq = 0;
+        while (!stop_flag) {
+            long now = (long)time(NULL);
+            if (now - last_tx >= period) {
+                last_tx = now;
+                int tl = (int)strlen(me);
+                if (tl > 20) tl = 20;
+                unsigned char tele[80];
+                int tn = tele_pack(tele, sizeof tele);
+                /* Кадр 802.15.4: без заголовка радио приёмника фильтрует
+                   пакет по мусору в первых байтах. FCF = кадр данных со
+                   сжатым PAN, адреса короткие, получатель широковещательный. */
+                int n = 0;
+                unsigned char body[160];
+                unsigned int ctr = (unsigned int)time(NULL);
+                body[n++] = 0x41;                       /* FCF: данные, сжатый PAN */
+                body[n++] = 0x88;                       /* FCF: адреса короткие */
+                body[n++] = (unsigned char)seq++;
+                body[n++] = 0xFF; body[n++] = 0xFF;     /* PAN получателя: всем */
+                body[n++] = 0xFF; body[n++] = 0xFF;     /* кому: всем */
+                body[n++] = (unsigned char)(myid & 0xFF);
+                body[n++] = (unsigned char)((myid >> 8) & 0xFF);
+                body[n++] = 0x41;                       /* наша метка полезной части */
+                body[n++] = zkey_ok ? ZSEC_CCM : ZSEC_PLAIN;
+                body[n++] = (unsigned char)(ctr & 0xFF);
+                body[n++] = (unsigned char)((ctr >> 8) & 0xFF);
+                body[n++] = (unsigned char)((ctr >> 16) & 0xFF);
+                body[n++] = (unsigned char)((ctr >> 24) & 0xFF);
+                int aadlen = n;                          /* заголовок подписан целиком */
+                int pstart = n;
+                body[n++] = (unsigned char)tl;
+                memcpy(body + n, me, tl); n += tl;
+                memcpy(body + n, tele, tn); n += tn;
+                int plen = n - pstart;
+                if (zkey_ok) {
+                    unsigned char tag[ZSEC_MIC];
+                    if (zsec_seal(body + pstart, plen, body, aadlen, myid, ctr, tag) == 0) {
+                        memcpy(body + n, tag, ZSEC_MIC);
+                        n += ZSEC_MIC;
+                    } else {
+                        body[9] = ZSEC_PLAIN;
+                    }
+                }
+                body[n++] = 0; body[n++] = 0;           /* место под CRC радио */
+                d[0] = (unsigned char)n;
+                memcpy(d + 1, body, n);
+                ezsp_cmd(0x89, d, n + 1);
+
+                for (int i = 0; i < 3; i++) {
+                    int pn = ezsp_read(pl, sizeof pl, 200);
+                    if (pn >= 4 && pl[2] == 0x89) {
+                        if (getenv("ZIG_DEBUG"))
+                            fprintf(stderr, "маячок: длина %d -> статус %d\n", n, pl[3]);
+                        break;
+                    }
+                }
+                /* После передачи приёмник глохнет: поднимаем библиотеку заново
+                   с включённым обратным вызовом и возвращаем канал. */
+                int s_end = -1, s_start = -1, s_ch = -1;
+                ezsp_cmd(0x84, NULL, 0);
+                for (int i = 0; i < 3; i++) {
+                    int pn = ezsp_read(pl, sizeof pl, 300);
+                    if (pn >= 4 && pl[2] == 0x84) { s_end = pl[3]; break; }
+                }
+                d[0] = 1;
+                ezsp_cmd(0x83, d, 1);
+                for (int i = 0; i < 3; i++) {
+                    int pn = ezsp_read(pl, sizeof pl, 300);
+                    if (pn >= 4 && pl[2] == 0x83) { s_start = pl[3]; break; }
+                }
+                d[0] = (unsigned char)ch;
+                ezsp_cmd(0x8A, d, 1);
+                for (int i = 0; i < 3; i++) {
+                    int pn = ezsp_read(pl, sizeof pl, 300);
+                    if (pn >= 4 && pl[2] == 0x8A) { s_ch = pl[3]; break; }
+                }
+                if (getenv("ZIG_DEBUG"))
+                    fprintf(stderr, "возврат в приём: end=%d start=%d ch=%d\n",
+                            s_end, s_start, s_ch);
+            }
+            int pn = ezsp_read(pl, sizeof pl, 700);
+            if (pn > 0 && getenv("ZIG_DEBUG"))
+                fprintf(stderr, "приём: pn=%d id=0x%02X метка=0x%02X len=%d\n",
+                        pn, pn > 2 ? pl[2] : 0, pn > 6 ? pl[6] : 0, pn > 5 ? pl[5] : 0);
+            /* Кадр: [lqi, rssi, длина] + MAC-заголовок 9 байт + наша часть */
+            if (pn >= 26 && pl[2] == 0x8E && pl[6] == 0x41 && pl[7] == 0x88
+                && pl[15] == 0x41) {
+                int lqi = pl[3], rssi = (signed char)pl[4], len = pl[5];
+                int sec = pl[16];
+                unsigned int src = pl[13] | (pl[14] << 8);
+                unsigned int ctr = (unsigned int)pl[17] | ((unsigned int)pl[18] << 8)
+                                 | ((unsigned int)pl[19] << 16) | ((unsigned int)pl[20] << 24);
+                /* открытая часть: 9 байт MAC + метка + режим + счётчик */
+                int plen = len - 15 - 2 - (sec == ZSEC_CCM ? ZSEC_MIC : 0);
+                unsigned char body[160];
+                if (plen < 2 || plen > (int)sizeof body || 21 + plen > pn) continue;
+                memcpy(body, pl + 21, plen);
+                if (sec == ZSEC_CCM) {
+                    if (!zkey_ok) continue;              /* чужой ключ - молча мимо */
+                    if (zsec_open(body, plen, pl + 6, 15, src, ctr,
+                                  pl + 21 + plen) != 0) continue;
+                } else if (zkey_ok) {
+                    continue;                            /* с ключом открытый текст не принимаем */
+                }
+                int tl = body[0];
+                if (tl < 0 || tl > 20 || tl + 1 > plen) tl = 0;
+                char nm[24];
+                int k = 0;
+                for (; k < tl; k++) {
+                    unsigned char c = body[1 + k];
+                    nm[k] = (c >= 32 && c < 127) ? (char)c : '.';
+                }
+                nm[k] = 0;
+                char mj[320];
+                tele_unpack(body + 1 + tl, plen - 1 - tl, mj, sizeof mj);
+                if (k > 0 && strcmp(nm, me) != 0) {
+                    int idx = -1;
+                    for (int j = 0; j < npr; j++) if (!strcmp(pr[j].name, nm)) idx = j;
+                    if (idx < 0 && npr < 8) { idx = npr++; snprintf(pr[idx].name, sizeof pr[idx].name, "%s", nm); }
+                    /* повтор чужого пакета не принимаем: счётчик обязан расти.
+                       Исключение - сосед долго молчал, у него мог быть перезапуск. */
+                    if (idx >= 0 && sec == ZSEC_CCM && ctr <= pr[idx].ctr
+                        && (long)time(NULL) - pr[idx].seen < 120) continue;
+                    if (idx >= 0) {
+                        pr[idx].ctr = ctr;
+                        pr[idx].rssi = rssi;
+                        pr[idx].lqi = lqi;
+                        pr[idx].seen = (long)time(NULL);
+                        pr[idx].seq = pl[7];
+                        snprintf(pr[idx].tele, sizeof pr[idx].tele, "%s", mj);
+                    }
+                }
+            }
+            now = (long)time(NULL);
+            if (now - last_save >= 2) {
+                last_save = now;
+                char tmp[128];
+                snprintf(tmp, sizeof tmp, "%s.tmp", out);
+                FILE *f = fopen(tmp, "w");
+                if (f) {
+                    fprintf(f, "{\"ok\":1,\"me\":\"%s\",\"ch\":%d,\"enc\":%d,"
+                               "\"chip\":\"EM357 EZSP v%d %d.%d.%d.%d\",\"ts\":%ld,\"peers\":[",
+                            me, ch, zkey_ok, proto, (sver >> 12) & 15, (sver >> 8) & 15,
+                            (sver >> 4) & 15, sver & 15, now);
+                    for (int j = 0; j < npr; j++)
+                        fprintf(f, "%s{\"name\":\"%s\",\"rssi\":%d,\"lqi\":%d,\"age\":%ld,\"m\":{%s}}",
+                                j ? "," : "", pr[j].name, pr[j].rssi, pr[j].lqi,
+                                now - pr[j].seen, pr[j].tele);
+                    fprintf(f, "]}\n");
+                    fclose(f);
+                    rename(tmp, out);
+                }
+            }
+        }
+        ezsp_cmd(0x84, NULL, 0);
+        ezsp_read(pl, sizeof pl, 400);
     } else if (!strcmp(cmd, "listen") || !strcmp(cmd, "send")) {
         /* Заводская библиотека умеет и передавать, и принимать сырые пакеты в
            том же диапазоне. Стек для этого не нужен - а он у нас и не передаёт. */
@@ -539,6 +983,11 @@ int main(int argc, char **argv)
                 int pn = ezsp_read(pl, sizeof pl, 900);
                 if (pn >= 6 && pl[2] == 0x8E) {
                     int lqi = pl[3], rssi = (signed char)pl[4], len = pl[5];
+                    if (getenv("ZIG_DEBUG")) {
+                        fprintf(stderr, "сырой кадр (pn=%d, len=%d):", pn, len);
+                        for (int k = 6; k < pn && k < 40; k++) fprintf(stderr, " %02X", pl[k]);
+                        fprintf(stderr, "\n");
+                    }
                     char txt[64] = "";
                     int show = len > 2 ? len - 2 : 0;      /* хвост - CRC радио */
                     for (int k = 0; k < show && k < 40 && 6 + k < pn; k++) {
