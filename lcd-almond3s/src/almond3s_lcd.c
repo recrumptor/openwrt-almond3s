@@ -171,20 +171,40 @@ static long bl_period_ns = BL_PERIOD_NS;  /* можно менять на ход
  * идут на одной частоте. */
 
 static volatile bool bl_bus_busy;   /* идёт передача кадра на панель */
-/* Замер провалов: самый долгий тёмный промежуток. При 250 Гц и яркости 10%
- * он обязан быть 3.6 мс; всё, что заметно больше, глаз и видит как мерцание. */
+/* Замер провалов: самый долгий тёмный промежуток и число растянутых фаз.
+ * Тёмная фаза обязана длиться period - on_ns; всё, что дольше этого плюс
+ * 400 мкс на дрожание таймера, глаз и видит как мерцание. */
 static u64 bl_off_since;
 static u32 bl_max_off_us;
 static u32 bl_long_off;
+/* Зеркальный замер по светлой фазе: затянувшийся свет виден как ЯРКАЯ
+ * вспышка, и на малой яркости она заметнее любого провала - окно света там
+ * всего сотни микросекунд. */
+static u64 bl_on_since;
+static u32 bl_max_on_us;
+static u32 bl_long_on;
 static volatile bool snap_ready;    /* снимок кадра уже готов (сделан writer'ом) */
 static volatile bool flush_busy;    /* снимок прямо сейчас уезжает на панель */
 static struct hrtimer bl_timer;
 static int  bl_level = BL_MAX;   /* текущая яркость */
 static bool bl_timer_on;
 static bool bl_phase_on;         /* сейчас горит */
+static u32  bl_on_ns;            /* сколько наносекунд периода подсветка горит */
 
 static inline void bl_pin(bool on)
 {
+    if (!on && bl_on_since) {
+        u64 d = ktime_get_ns() - bl_on_since;
+        u32 us;
+        do_div(d, 1000);
+        us = (u32)d;
+        if (us > bl_max_on_us) bl_max_on_us = us;
+        if (us > bl_on_ns / 1000 + 400) bl_long_on++;
+        bl_on_since = 0;
+    } else if (on) {
+        bl_on_since = ktime_get_ns();
+    }
+
     if (!on) {
         bl_off_since = ktime_get_ns();
     } else if (bl_off_since) {
@@ -193,11 +213,36 @@ static inline void bl_pin(bool on)
         do_div(d, 1000);       /* на 32-битном MIPS деления u64 нет */
         us = (u32)d;
         if (us > bl_max_off_us) bl_max_off_us = us;
-        if (us > 6000) bl_long_off++;
+        /* Тёмная фаза длится period - on_ns; сверять надо с ней, а не с
+         * длительностью света, иначе под условие попадает каждая фаза. */
+        if (us > ((u32)bl_period_ns - bl_on_ns) / 1000 + 400) bl_long_off++;
         bl_off_since = 0;
     }
     bl_bit = on ? BIT_BL : 0;
     gw(on ? GPIO_DSET_OFF : GPIO_DCLR_OFF, BIT_BL);
+}
+
+/* Фаза ШИМ по абсолютным часам. Нужна на границах передачи кадра: внутри
+ * цикла вывода фазу ведёт накопитель, а в покое - таймер по часам. Раньше
+ * накопитель начинался с нуля на каждом кадре, то есть перерисовка всегда
+ * открывала свежее окно света независимо от того, где фаза была на самом
+ * деле. На малой яркости это лишнее окно занимает заметную долю периода, и
+ * заставка мигала ровно столько раз в секунду, сколько перерисовывалась. */
+static u32 bl_phase_now(void)
+{
+    u64 now = ktime_get_ns();
+    return do_div(now, (u32)bl_period_ns);
+}
+
+static void bl_resync(void)
+{
+    bool on;
+    if (bl_level == 0 || bl_level == BL_MAX) return;
+    on = bl_phase_now() < bl_on_ns;
+    if (on != bl_phase_on) {
+        bl_phase_on = on;
+        bl_pin(on);
+    }
 }
 
 static enum hrtimer_restart bl_tick(struct hrtimer *t)
@@ -209,6 +254,13 @@ static enum hrtimer_restart bl_tick(struct hrtimer *t)
     /* Пока идёт передача кадра - не дёргаемся: прерывание посреди битбанга
      * рвёт такты шины. Там подсветку крутит сам вывод, по тем же часам. */
     if (bl_bus_busy) {
+        /* Отсрочку пробовали укоротить до 200 мкс - в расчёте, что таймер
+         * подхватит короткое окно света, если его проскочит цикл вывода.
+         * Замер показал обратное: на 9% яркости самый долгий провал вырос с
+         * 3987 до 7785 мкс, на ночном минимуме до 7901. Причина в том, что
+         * во время передачи ШИМ ведёт сам цикл, а лишние прерывания его
+         * притормаживают - и он проскакивает окно, которое должен был
+         * открыть. Миллисекунда здесь лучше. */
         hrtimer_forward_now(t, ns_to_ktime(1000000L));
         return HRTIMER_RESTART;
     }
@@ -260,6 +312,29 @@ static void bl_set_level(int level)
     }
 }
 
+/* Быстрая шина: данные и опускание строба уходят ОДНОЙ записью в DIR вместо
+ * трёх (так делал и заводской драйвер). Меняется на живую:
+ *   echo 0 > /sys/module/almond3s_lcd/parameters/fast_bus   - вернуть старый путь
+ * Сравнить скорость: ioctl 18 отдаёт мкс на кадр. */
+static int fast_bus = 1;
+module_param(fast_bus, int, 0644);
+MODULE_PARM_DESC(fast_bus, "1 = данные+строб одной записью (быстрее), 0 = старый путь");
+
+/* Те же биты, что кладёт gpio_set_byte, но БЕЗ записи в регистр. */
+static inline u32 byte_bits(u8 val)
+{
+    u32 d = shadow_dir & ~(BIT_D0|BIT_D1|BIT_D2|BIT_D3|BIT_D4|BIT_D5|BIT_D6|BIT_D7);
+    if (val & 0x01) d |= BIT_D0;
+    if (val & 0x02) d |= BIT_D1;
+    if (val & 0x04) d |= BIT_D2;
+    if (val & 0x08) d |= BIT_D3;
+    if (val & 0x10) d |= BIT_D4;
+    if (val & 0x20) d |= BIT_D5;
+    if (val & 0x40) d |= BIT_D6;
+    if (val & 0x80) d |= BIT_D7;
+    return d;
+}
+
 static void gpio_set_byte(u8 val)
 {
     if (val & 0x01) shadow_dir |= BIT_D0; else shadow_dir &= ~BIT_D0;
@@ -303,8 +378,60 @@ static void lcd_dat(u8 dat)
     gw_dir(shadow_dir);
 }
 
+/* 12-битный цвет (COLMOD 0x53): 3 байта на ДВА пикселя вместо 4 - на четверть
+ * меньше тактов шины. Цветов 4096 вместо 65536. Переключается на живую:
+ *   echo 1 > /sys/module/almond3s_lcd/parameters/color12 */
+/* Обновление через строку: за раз уезжают только чётные либо только
+ * нечётные строки, поэтому байтов по шине вдвое меньше и частота обновления
+ * почти вдвое выше. Цена - гребёнка на быстром движении, поэтому по
+ * умолчанию выключено:
+ *   echo 1 > /sys/module/almond3s_lcd/parameters/interlace */
+static int interlace;
+module_param(interlace, int, 0644);
+MODULE_PARM_DESC(interlace, "1 = обновлять через строку (быстрее, но гребёнка)");
+static int il_field;
+
+static int color12;
+module_param(color12, int, 0644);
+MODULE_PARM_DESC(color12, "1 = 12-битный цвет (быстрее на ~25%), 0 = 16-битный");
+static int color12_applied = -1;
+
+static inline void lcd_write_8d(u8 val)
+{
+    if (fast_bus) {
+        u32 d = byte_bits(val);
+        gw_dir(d & ~BIT_DCX);
+        shadow_dir = d | BIT_DCX;
+        gw_dir(shadow_dir);
+        return;
+    }
+    gpio_set_byte(val);
+    shadow_dir &= ~BIT_DCX; gw_dir(shadow_dir);
+    shadow_dir |= BIT_DCX;  gw_dir(shadow_dir);
+}
+
+/* Два пикселя RGB565 -> три байта RGB444, как ждёт панель в режиме 0x53. */
+static inline void lcd_write_pair12(u16 a, u16 b)
+{
+    lcd_write_8d((u8)((((a >> 12) & 0xF) << 4) | ((a >> 7) & 0xF)));
+    lcd_write_8d((u8)((((a >> 1)  & 0xF) << 4) | ((b >> 12) & 0xF)));
+    lcd_write_8d((u8)((((b >> 7)  & 0xF) << 4) | ((b >> 1)  & 0xF)));
+}
+
 static void lcd_write_16d(u16 val)
 {
+    if (fast_bus) {
+        /* На байт: «данные + строб вниз» одной записью, затем фронт вверх -
+         * панель защёлкивает по нему, данные к этому моменту уже стоят. */
+        u32 d = byte_bits(val >> 8);
+        gw_dir(d & ~BIT_DCX);
+        gw_dir(d | BIT_DCX);
+        d = byte_bits(val & 0xFF);
+        gw_dir(d & ~BIT_DCX);
+        shadow_dir = d | BIT_DCX;
+        gw_dir(shadow_dir);
+        return;
+    }
     gpio_set_byte(val >> 8);
     shadow_dir &= ~BIT_DCX; gw_dir(shadow_dir);
     shadow_dir |= BIT_DCX;  gw_dir(shadow_dir);
@@ -498,20 +625,41 @@ static u16 flush_snap[LCD_W * LCD_H]; /* snapshot buffer to prevent tearing */
  * таблиц - на 32 и на 64 значения, и пиксель пересобирается парой сдвигов.
  */
 static int  dig_level = BL_MAX;      /* 255 - без затемнения */
-static u8   dig5[32], dig6[64];
+static u8   digR[32], digG[64], digB[32];
+/* Тёплый фильтр 0..100: вечернее наложение. Красный не трогаем совсем,
+ * зелёный убавляем слегка, синий заметно - получается тёплый свет, а не
+ * жёлтая муть. Идёт по тому же пути, что цифровое затемнение, поэтому
+ * они честно перемножаются и работают вместе. */
+static int  warm_level;
+static int  dig_plain = 1;   /* ни затемнения, ни фильтра - быстрый путь */
+
+
+static void bl_calc(void)
+{
+    bl_on_ns = (u32)((u32)bl_period_ns / BL_MAX * bl_level);
+}
 
 static void dig_build(void)
 {
     int i;
-    for (i = 0; i < 32; i++) dig5[i] = i * dig_level / BL_MAX;
-    for (i = 0; i < 64; i++) dig6[i] = i * dig_level / BL_MAX;
+    int gk = 255 - warm_level * 55 / 100;    /* зелёный  до -22% */
+    int bk = 255 - warm_level * 135 / 100;   /* синий    до -53% */
+
+    for (i = 0; i < 32; i++) {
+        digR[i] = i * dig_level / BL_MAX;
+        digB[i] = i * dig_level / BL_MAX * bk / 255;
+    }
+    for (i = 0; i < 64; i++)
+        digG[i] = i * dig_level / BL_MAX * gk / 255;
+
+    dig_plain = (dig_level == BL_MAX && warm_level == 0);
 }
 
 static inline u16 dig_pixel(u16 p)
 {
-    return ((u16)dig5[(p >> 11) & 0x1F] << 11) |
-           ((u16)dig6[(p >> 5)  & 0x3F] << 5)  |
-            (u16)dig5[p & 0x1F];
+    return ((u16)digR[(p >> 11) & 0x1F] << 11) |
+           ((u16)digG[(p >> 5)  & 0x3F] << 5)  |
+            (u16)digB[p & 0x1F];
 }
 
 static u16 *prev_snap;
@@ -521,13 +669,15 @@ static int  stat_us;        /* сколько он занял, мкс */
 static int  stat_frames;    /* кадров всего */
 
 /* Одна пачка строк [r0..r1] целиком: окно по вертикали + запись памяти. */
-static void lcd_send_rows(int r0, int r1)
+static void lcd_send_rows(int r0, int r1, int c0, int c1)
 {
-    int i, n = (r1 - r0 + 1) * LCD_W;
+    const int w = c1 - c0 + 1;
+    int i, n = (r1 - r0 + 1) * w;
     int dim = (bl_level > 0 && bl_level < BL_MAX);
     static int slot_pos;
     static int since_yield;
-    const u16 *src = flush_snap + r0 * LCD_W;
+    const u16 *src = flush_snap + r0 * LCD_W + c0;
+    int col = 0;
 
     /* Таймер ШИМ замирает ровно на время передачи: прерывание посреди битбанга
      * рвёт такты шины. Всё остальное время кадра (сравнение строк, установка
@@ -541,8 +691,94 @@ static void lcd_send_rows(int r0, int r1)
     lcd_dat(r1 >> 8); lcd_dat(r1 & 0xFF);
     lcd_write_mem();
 
+    /* Глобалы читаем ОДИН раз: в цикле их 76800 итераций на полный экран, и
+     * каждое обращение к памяти там заметно. */
+    {
+        const int plain = dig_plain;
+        const int c12   = (color12_applied == 1);
+        u64 last_ns = dim ? ktime_get_ns() : 0;
+        u32 phase;
+
+        bl_calc();
+        phase = dim ? bl_phase_now() : 0;   /* одно деление на кадр, не 38 тысяч */
+
+        for (i = 0; i < n; i++) {
+            if (c12) {
+                if ((col & 1) == 0) {
+                    u16 a = plain ? src[col]     : dig_pixel(src[col]);
+                    u16 b = plain ? src[col + 1] : dig_pixel(src[col + 1]);
+                    lcd_write_pair12(a, b);
+                }
+            } else {
+                lcd_write_16d(plain ? src[col] : dig_pixel(src[col]));
+            }
+            if (++col == w) { col = 0; src += LCD_W; }
+
+            if ((++slot_pos & (BL_SLOT_PIXELS - 1)) != 0)
+                continue;
+
+            /* Фазу ведём накопителем: раньше здесь было do_div, то есть 64-битное
+             * деление каждые два пикселя (~38 тысяч делений на кадр) - на 32-битном
+             * MIPS это дорого. Теперь вычитание, и порог посчитан заранее. */
+            if (dim) {
+                u64 now = ktime_get_ns();
+                bool on;
+                phase += (u32)(now - last_ns);
+                last_ns = now;
+                while (phase >= (u32)bl_period_ns)
+                    phase -= (u32)bl_period_ns;
+                on = phase < bl_on_ns;
+                if (on != bl_phase_on) {
+                    bl_phase_on = on;
+                    bl_pin(on);
+                }
+            }
+
+            /* Уступаем процессор реже: 64 пикселя давали 1200 вызовов на кадр.
+               И только в ТЁМНОЙ фазе. Раньше было наоборот - уступали, пока
+               подсветка горит, - и планировщик забирал процессор ровно на
+               открытом окне света. На малой яркости окно длится 392 мкс, а
+               пауза бывает миллисекунды: замер на «Матрице» при 10% показал
+               свет до 8394 мкс вместо 392 и 97 таких вспышек за полминуты -
+               это и было видно как яркое мерцание. В темноте запас 3.6 мс,
+               и затянувшаяся пауза даёт лишь чуть позднее следующее окно.
+               Но и в темноте уступаем только в её НАЧАЛЕ: если до следующего
+               окна света осталось меньше полутора миллисекунд, пауза съест
+               его целиком, и вместо вспышки получится провал на несколько
+               периодов подряд. */
+            if (++since_yield >= 256 &&
+                (!dim || (!bl_phase_on &&
+                          (u32)bl_period_ns - phase > 1500000u))) {
+                since_yield = 0;
+                /* На время паузы отдаём подсветку таймеру. Пока цикл стоит в
+                   планировщике, шину никто не гонит, а ШИМ иначе замирает: с
+                   паузой в десяток миллисекунд подряд пропадало по три окна
+                   света. Флаг снимаем ровно на точке уступки, где никакая
+                   передача не начата. */
+                bl_bus_busy = false;
+                cond_resched();
+                bl_bus_busy = true;
+                if (dim) {
+                    last_ns = ktime_get_ns();
+                    phase = bl_phase_now();   /* таймер мог сдвинуть фазу */
+                    bl_phase_on = phase < bl_on_ns;
+                }
+            }
+        }
+    }
+#if 0
     for (i = 0; i < n; i++) {
-        lcd_write_16d(dig_level == BL_MAX ? src[i] : dig_pixel(src[i]));
+        if (color12_applied == 1) {
+            /* Пиксели идут парами; n всегда кратно ширине строки, так что
+               пара никогда не разрывается между вызовами. */
+            if ((i & 1) == 0) {
+                u16 a = dig_plain ? src[i]     : dig_pixel(src[i]);
+                u16 b = dig_plain ? src[i + 1] : dig_pixel(src[i + 1]);
+                lcd_write_pair12(a, b);
+            }
+        } else {
+            lcd_write_16d(dig_plain ? src[i] : dig_pixel(src[i]));
+        }
         if ((++slot_pos & (BL_SLOT_PIXELS - 1)) != 0)
             continue;
 
@@ -568,14 +804,18 @@ static void lcd_send_rows(int r0, int r1)
          * паузой принудительно, но это давало обратное: лишние вспышки на
          * каждую паузу. Пропущенная возможность уступить не страшна -
          * следующая придёт через 60 микросекунд. */
-        if (++since_yield >= 64 && (!dim || bl_phase_on)) {
+        if (++since_yield >= 64 && (!dim || !bl_phase_on)) {
             since_yield = 0;
             cond_resched();
         }
     }
+#endif
     lcd_cs_deselect();
     bl_bus_busy = false;
+    bl_resync();   /* таймер после передачи просыпается с задержкой до 1 мс */
 }
+
+static int win_c0, win_c1;   /* окно колонок текущего кадра */
 
 static void lcd_flush_fb(void)
 {
@@ -598,15 +838,66 @@ static void lcd_flush_fb(void)
 
     flush_busy = true;
 
-    /* Колонки всегда полные, окно двигаем только по строкам. */
-    lcd_cmd(0x2A); lcd_dat(0); lcd_dat(0); lcd_dat(1); lcd_dat(0x3F);
+    /* Формат пикселя сменили на живую - сообщаем панели и перерисовываем всё:
+       прошлый снимок закодирован иначе, построчное сравнение тут не годится. */
+    if (color12_applied != color12) {
+        lcd_cmd(0x3A);
+        lcd_dat(color12 ? 0x53 : 0x55);
+        color12_applied = color12;
+        prev_valid = false;
+    }
+
+    /* Раньше на панель всегда уезжала вся ширина 320px, даже если менялась
+     * узкая полоса. Считаем реальные границы изменений по колонкам и сужаем
+     * окно: у эмулятора игровое поле 256px в центре, а чёрные полосы с
+     * кнопками не меняются вовсе - это сразу минус пятая часть шины. */
+    bool snap_partial = false;
+    {
+        int r, c, lo = LCD_W, hi = -1;
+        if (!prev_valid || !prev_snap) {
+            lo = 0; hi = LCD_W - 1;
+        } else {
+            for (r = 0; r < LCD_H; r++) {
+                const u16 *a = flush_snap + r * LCD_W;
+                const u16 *b = prev_snap  + r * LCD_W;
+                if (!memcmp(a, b, LCD_W * sizeof(u16))) continue;
+                for (c = 0; c < lo; c++)
+                    if (a[c] != b[c]) { if (c < lo) lo = c; break; }
+                for (c = LCD_W - 1; c > hi; c--)
+                    if (a[c] != b[c]) { if (c > hi) hi = c; break; }
+            }
+        }
+        if (hi < lo) { lo = 0; hi = LCD_W - 1; }   /* изменений нет - не сузить */
+        lo &= ~1; hi |= 1;                          /* ширина чётная: 12-битный
+                                                       режим шлёт пиксели парами */
+        win_c0 = lo; win_c1 = hi;
+    }
+    lcd_cmd(0x2A);
+    lcd_dat(win_c0 >> 8); lcd_dat(win_c0 & 0xFF);
+    lcd_dat(win_c1 >> 8); lcd_dat(win_c1 & 0xFF);
 
     {
         ktime_t t0 = ktime_get();
         stat_rows = 0;
+
     if (!prev_valid || !prev_snap) {
-        lcd_send_rows(0, LCD_H - 1);
+        lcd_send_rows(0, LCD_H - 1, win_c0, win_c1);
         stat_rows = LCD_H;
+    } else if (interlace) {
+        /* Строку, которую в этот проход не отправили, НЕ отмечаем в prev_snap:
+         * иначе её изменения считались бы доставленными и пропали бы совсем.
+         * Поэтому снимок здесь обновляем построчно, а не целиком в конце. */
+        for (r = il_field; r < LCD_H; r += 2) {
+            if (!memcmp(flush_snap + r * LCD_W, prev_snap + r * LCD_W,
+                        LCD_W * sizeof(u16)))
+                continue;
+            lcd_send_rows(r, r, win_c0, win_c1);
+            memcpy(prev_snap + r * LCD_W, flush_snap + r * LCD_W,
+                   LCD_W * sizeof(u16));
+            stat_rows++;
+        }
+        il_field ^= 1;
+        snap_partial = true;
     } else {
         r = 0;
         while (r < LCD_H) {
@@ -620,7 +911,7 @@ static void lcd_flush_fb(void)
                                        prev_snap + r * LCD_W,
                                        LCD_W * sizeof(u16)))
                 r++;
-            lcd_send_rows(r0, r - 1);
+            lcd_send_rows(r0, r - 1, win_c0, win_c1);
             stat_rows += r - r0;
         }
     }
@@ -633,7 +924,7 @@ static void lcd_flush_fb(void)
      * Ничего страшного не произойдёт: таймер ШИМ всё это время крутится вхолостую
      * и подхватит фазу в ближайшую миллисекунду. */
 
-    if (prev_snap) {
+    if (prev_snap && !snap_partial) {
         memcpy(prev_snap, flush_snap, FB_SIZE);
         prev_valid = true;
     }
@@ -684,6 +975,58 @@ static char matrix_dmesg_line[128];
  * перетираем её из kmsg. ttl тикает каждый кадр матрицы (~10/с). */
 static int matrix_ext_ttl;
 
+/* Шрифт «матрицы» знает только ASCII (95 знаков), а наши сообщения в логе
+ * написаны по-русски: каждая буква кириллицы - два байта вне таблицы, и оба
+ * превращались в пробел. Строка выглядела как «5gmodem: » и дальше чернота.
+ * Поэтому переводим кириллицу в латиницу, а прочие не-ASCII байты выбрасываем. */
+static void translit(const char *src, char *dst, int dstsz)
+{
+    static const char *TAB[32] = {
+        "A","B","V","G","D","E","Zh","Z","I","Y","K","L","M","N","O","P",
+        "R","S","T","U","F","H","Ts","Ch","Sh","Sch","","Y","","E","Yu","Ya"
+    };
+    int o = 0;
+    while (*src && o < dstsz - 4) {
+        unsigned char c = (unsigned char)*src;
+        unsigned cp = 0;
+        if (c < 0x80) {                     /* обычный ASCII */
+            dst[o++] = (c >= 32) ? (char)c : ' ';
+            src++;
+            continue;
+        }
+        if ((c & 0xE0) == 0xC0 && (src[1] & 0xC0) == 0x80) {
+            cp = ((c & 0x1F) << 6) | (src[1] & 0x3F);
+            src += 2;
+        } else {                            /* не UTF-8 - просто пропускаем */
+            src++;
+            continue;
+        }
+        if (cp == 0x401) cp = 0x415;        /* Ё как Е */
+        if (cp == 0x451) cp = 0x435;        /* ё как е */
+        if (cp >= 0x410 && cp <= 0x42F) {
+            const char *t = TAB[cp - 0x410];
+            while (*t && o < dstsz - 1) dst[o++] = *t++;
+        } else if (cp >= 0x430 && cp <= 0x44F) {
+            const char *t = TAB[cp - 0x430];
+            int first = 1;
+            while (*t && o < dstsz - 1) {   /* строчные - в нижнем регистре */
+                char ch = *t++;
+                dst[o++] = first ? (char)(ch >= 'A' && ch <= 'Z' ? ch + 32 : ch) : ch;
+                first = 0;
+            }
+        }
+    }
+    dst[o] = 0;
+}
+
+/* Время сцен считаем в миллисекундах, а не в кадрах: темп отрисовки менялся
+ * уже трижды, и каждый раз анимации, привязанные к кадрам, разъезжались -
+ * курсор начинал частить, живой лог мелькать. */
+static unsigned long scene_ms(void)
+{
+    return jiffies_to_msecs(jiffies);
+}
+
 static void matrix_update_dmesg(void)
 {
     struct kmsg_dump_iter iter;
@@ -710,10 +1053,8 @@ static void matrix_update_dmesg(void)
          * пропускаем, чтобы внизу бежали события ядра, а не наш дебаг.
          * Бут-лого свой лог берёт отдельно (banner_update_log) и не фильтрует. */
         if (strncmp(msg, "almond3s-lcd", 12) == 0) continue;
-        if (*msg) {
-            strncpy(matrix_dmesg_line, msg, sizeof(matrix_dmesg_line) - 1);
-            matrix_dmesg_line[sizeof(matrix_dmesg_line) - 1] = 0;
-        }
+        if (*msg)
+            translit(msg, matrix_dmesg_line, sizeof(matrix_dmesg_line));
     }
 }
 #define RAB_W 20
@@ -722,6 +1063,8 @@ static void matrix_update_dmesg(void)
 #define RAB_Y0 3                              /* upper half so text fits below */
 
 static int   matrix_init;
+static unsigned long matrix_t0;   /* начало сцены: тайминги текста в реальном
+                                     времени, а не в кадрах */
 static u8    m_drop_y[MATRIX_COLS];
 static u8    m_drop_sp[MATRIX_COLS];
 static u8    m_drop_tick[MATRIX_COLS];
@@ -784,12 +1127,12 @@ static void scene_matrix(int t)
 {
     u16 *fb = (u16 *)framebuffer;
     int i, k, r, c;
-    int accumulating;
+    int accumulating, ms;
 
     if (!matrix_init) {
         for (i = 0; i < MATRIX_COLS; i++) {
             m_drop_y[i]    = sin_lut[(i * 7) & 0xFF] % MATRIX_ROWS;
-            m_drop_sp[i]   = 1 + (sin_lut[(i * 13) & 0xFF] & 0x07);
+            m_drop_sp[i]   = 1 + (sin_lut[(i * 13) & 0xFF] & 0x03);
             m_drop_tick[i] = 0;
         }
         for (r = 0; r < MATRIX_ROWS; r++) {
@@ -800,19 +1143,30 @@ static void scene_matrix(int t)
             }
         }
         matrix_init = 1;
+        matrix_t0 = jiffies;
     }
 
-    /* Fade green channel everywhere for trail decay */
+    /* Затухание следа. Чёрные пиксели пропускаем: результат для них тот же
+     * ноль, а их на экране подавляющее большинство - перебор всех 76800
+     * с чтением и записью стоил дороже, чем сама передача кадра на панель,
+     * и держал заставку на 20 кадрах вместо 40. */
     for (i = 0; i < LCD_W * LCD_H; i++) {
         u16 pxv = fb[i];
-        u8 g = (pxv >> 5) & 0x3F;
-        g = (g * 13) >> 4;
-        fb[i] = (u16)g << 5;
+        u8 g;
+        if (!pxv)
+            continue;
+        g = (pxv >> 5) & 0x3F;
+        fb[i] = (u16)((g * 13) >> 4) << 5;
     }
 
     /* Accumulation window: drops entering rabbit cells imprint permanently.
      * Before — pure rain. After — rabbit stays fully lit. */
-    accumulating = (t >= 28 && t < 115);
+    /* Тайминги ниже - в миллисекундах от начала сцены. Раньше они считались
+     * в кадрах, и любое изменение темпа сдвигало всю заставку: при ускорении
+     * надписи промелькивали бы вдвое быстрее, чем их можно прочесть. */
+    ms = (int)jiffies_to_msecs(jiffies - matrix_t0);
+
+    accumulating = (ms >= 1400 && ms < 5750);
 
     /* Advance columns and draw rain */
     for (i = 0; i < MATRIX_COLS; i++) {
@@ -822,7 +1176,7 @@ static void scene_matrix(int t)
             m_drop_y[i]++;
             if (m_drop_y[i] >= MATRIX_ROWS + 12) {
                 m_drop_y[i] = 0;
-                m_drop_sp[i] = 1 + (sin_lut[(t + i * 11) & 0xFF] & 0x07);
+                m_drop_sp[i] = 1 + (sin_lut[(t + i * 11) & 0xFF] & 0x03);
             }
             r = m_drop_y[i];
             if (r < MATRIX_ROWS) {
@@ -864,9 +1218,9 @@ static void scene_matrix(int t)
 
     /* Matrix text phases — white, mid-bottom strip */
     const char *msg = NULL;
-    if      (t >= 10 && t <  40) msg = "Wake up, Neo...";
-    else if (t >= 60 && t <  92) msg = "The Matrix has you...";
-    else if (t >= 112 && t < 150) msg = "Follow the white rabbit.";
+    if      (ms >=  500 && ms < 2000) msg = "Wake up, Neo...";
+    else if (ms >= 3000 && ms < 4600) msg = "The Matrix has you...";
+    else if (ms >= 5600 && ms < 7500) msg = "Follow the white rabbit.";
 
     if (msg) {
         int len = 0;
@@ -890,8 +1244,14 @@ static void scene_matrix(int t)
     }
 
     /* Live kmsg tail at very bottom — green console feel */
-    if ((t % 10) == 0 || matrix_dmesg_line[0] == 0)
+    /* Полный проход по кольцевому буферу ядра дороже, чем передача кадра на
+     * панель: строк там тысячи, а нужна одна последняя. Двух раз в секунду
+     * глазу достаточно, и это ровно та частота, что была при 20 кадрах. */
+    static unsigned long dmesg_at;
+    if (scene_ms() - dmesg_at >= 500 || matrix_dmesg_line[0] == 0) {
+        dmesg_at = scene_ms();
         matrix_update_dmesg();
+    }
     {
         int ty = LCD_H - 9;
         int y2, x2;
@@ -994,9 +1354,9 @@ static void scene_banner(int t)
         int x = left, y = top + i * BANNER_LINE_H;
         for (j = 0; s[j]; j++) { fb_putchar(fb, x, y, s[j], BANNER_LOGO, 0x0000); x += 6; }
     }
-    /* Терминальный курсор: зелёный прямоугольник через пробел после "L I F E",
-     * мигает ~0.5с (10 fps -> 5 кадров вкл / 5 выкл). */
-    if ((t / 5) % 2 == 0) {
+    /* Терминальный курсор: зелёный прямоугольник через пробел после "L I F E".
+     * Полсекунды горит, полсекунды нет - как в настоящем терминале. */
+    if ((scene_ms() / 500) % 2 == 0) {
         int cx = left + ((int)strlen(banner_lines[BANNER_NLINES - 1]) + 1) * 6;
         int rr, cc;
         for (rr = 0; rr < 7; rr++)
@@ -1010,7 +1370,11 @@ static void scene_banner(int t)
         int logx = left + 6;                          /* левая | лого */
         int logy = top + total_h + 8;
         int shown, start, k;
-        if (t % 3 == 0) banner_update_log();
+        static unsigned long log_at;
+        if (scene_ms() - log_at >= 150) {
+            log_at = scene_ms();
+            banner_update_log();
+        }
         shown = blog_total < BLOG_LINES ? blog_total : BLOG_LINES;
         start = blog_total < BLOG_LINES ? 0 : blog_head;
         for (k = 0; k < shown; k++) {
@@ -1146,6 +1510,7 @@ static int render_fn(void *data)
             lcd_hw_reset();
             lcd_init_ili9341();
             bl_bus_busy = false;
+            bl_resync();
             prev_valid = false;
             fb_dirty = 1;
         }
@@ -1157,6 +1522,7 @@ static int render_fn(void *data)
             if (n) lcd_dat(dt);
             lcd_cs_deselect();
             bl_bus_busy = false;
+            bl_resync();
             pcmd_tail = (pcmd_tail + 1) & 15;
         }
         if (splash_active) {
@@ -1165,7 +1531,12 @@ static int render_fn(void *data)
              * full-screen dmesg phase. */
             render_scene(current_scene, frame++);
             lcd_flush_fb();
-            msleep_interruptible(100);
+            /* Пауза была 100мс, потом 25мс. Кадр заставки стоит панели ~24мс
+             * и упирается в шину, а не в паузу: «матрица» перекрашивает весь
+             * экран каждый кадр (затухание следа), поэтому дифф строк здесь не
+             * помогает. Оставляем символическую паузу - только чтобы поток
+             * уступал процессор и быстро останавливался. */
+            msleep_interruptible(2);
             if (kthread_should_stop()) break;
         } else if (fb_dirty && !fb_writing) {
             console_phase = 2; /* userspace took over */
@@ -2212,6 +2583,19 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         bl_set_level((int)arg);
         return 0;
     }
+    if (cmd == 27) {
+        /* Тёплый фильтр 0..100. Как и затемнение, меняет цвета на панели, а
+         * сравнение строк идёт по исходному кадру - значит нужен полный
+         * перезалив. */
+        int w = (int)arg;
+        if (w < 0) w = 0;
+        if (w > 100) w = 100;
+        warm_level = w;
+        dig_build();
+        prev_valid = false;
+        fb_dirty = 1;
+        return 0;
+    }
     if (cmd == 19) {
         /* Цифровое затемнение 0..255. Меняем - весь экран надо переслать:
          * сравнение строк работает по исходному кадру, а на панели теперь
@@ -2234,11 +2618,14 @@ static long lcd_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         return 0;
     }
     if (cmd == 25) {
-        int d[2] = { (int)bl_max_off_us, (int)bl_long_off };
+        int d[4] = { (int)bl_max_off_us, (int)bl_long_off,
+                     (int)bl_max_on_us, (int)bl_long_on };
         if (copy_to_user((void __user *)arg, d, sizeof(d)))
             return -EFAULT;
         bl_max_off_us = 0;
         bl_long_off = 0;
+        bl_max_on_us = 0;
+        bl_long_on = 0;
         return 0;
     }
     if (cmd == 24) {

@@ -6,12 +6,84 @@ LCD support for the **Securifi Almond 3S** on OpenWrt: a kernel driver for the
 2.8" ILI9341 panel with its SX8650 touchscreen, and a userspace dashboard that
 shows network, modem, Wi-Fi, traffic and weather right on the device.
 
-The repository is an OpenWrt feed with two packages:
+The repository is an OpenWrt feed with three packages:
 
 | Package | What it is |
 |---|---|
 | `kmod-lcd-almond3s` | kernel driver: RGB565 framebuffer at `/dev/lcd`, touch, battery gauge over the PIC16LF1509 |
 | `lcd-ui-almond3s` | userspace: renderer, touch daemon, data collector and the ucode UI |
+| `nes-almond3s` | optional NES emulator (QuickNES) with a browser gamepad served over Wi-Fi |
+
+## Screens
+
+<table>
+<tr>
+<td align="center"><img src="docs/screens/menu.png" width="260"><br><sub>Main menu</sub></td>
+<td align="center"><img src="docs/screens/modem.png" width="260"><br><sub>Modem: signal and cell</sub></td>
+<td align="center"><img src="docs/screens/wifi.png" width="260"><br><sub>Wi-Fi with join QR codes</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screens/traffic.png" width="260"><br><sub>Traffic, live curves</sub></td>
+<td align="center"><img src="docs/screens/services.png" width="260"><br><sub>Service reachability</sub></td>
+<td align="center"><img src="docs/screens/weather.png" width="260"><br><sub>Weather</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screens/vpn.png" width="260"><br><sub>VPN: SSClash groups</sub></td>
+<td align="center"><img src="docs/screens/settings.png" width="260"><br><sub>Settings</sub></td>
+<td align="center"><img src="docs/screens/night.png" width="260"><br><sub>Night schedule</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screens/alarm.png" width="260"><br><sub>Alarm clock</sub></td>
+<td align="center"><img src="docs/screens/info.png" width="260"><br><sub>System info</sub></td>
+<td align="center"><img src="docs/screens/games.png" width="260"><br><sub>Games list</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screens/game-mario.png" width="260"><br><sub>NES emulator</sub></td>
+<td align="center"><img src="docs/screens/game-mario-select.png" width="260"><br><sub>On-screen gamepad</sub></td>
+<td align="center"><img src="docs/screens/terminal.png" width="260"><br><sub>Shell with on-screen keyboard</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screens/saver-widgets-overview.png" width="260"><br><sub>Widgets: overview</sub></td>
+<td align="center"><img src="docs/screens/saver-widgets-modem.png" width="260"><br><sub>Widgets: modem</sub></td>
+<td align="center"><img src="docs/screens/saver-widgets-system.png" width="260"><br><sub>Widgets: system</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screens/saver-weather.png" width="260"><br><sub>Weather screensaver</sub></td>
+<td align="center"><img src="docs/screens/saver-matrix.png" width="260"><br><sub>Matrix screensaver</sub></td>
+<td align="center"><img src="docs/screens/saver-logo.png" width="260"><br><sub>Logo screensaver</sub></td>
+</tr>
+</table>
+
+## What it does
+
+* **Network** — uplink list (modem, Wi-Fi STA, wired) with addresses and metrics;
+  tapping a card makes that uplink primary
+* **Wi-Fi** — both bands with client counts, on/off toggles and a QR code to join
+* **Modem** — operator, signal ladder with RSRP/RSRQ/SINR/RSSI, band, cell,
+  temperature and a second page with cell details and neighbours
+* **SMS** — inbox through `luci-app-5gmodem`: multipart messages glued back
+  together, unread marks synced both ways, full-screen reading with paging
+* **Traffic** — RX/TX for the modem and the current uplink, live curves,
+  tap zooms one graph full screen
+* **Services** — reachability and latency for a configurable host list
+* **Speedtest** — download/upload run right from the screen
+* **Weather** — current conditions from Open-Meteo with a city picker
+* **VPN** — SSClash: on/off, proxy groups, node latency, switching a node
+* **Games** — NES emulator (QuickNES): touch buttons, USB keyboard or a phone
+  gamepad in the browser over Wi-Fi, opened by a QR code
+* **Terminal** — a real shell on the panel (`forkpty` + libvterm) with an
+  on-screen keyboard: `ls`, `cd`, line editing, `top` and `vi` all work
+* **Alarm** — melody, time, one-shot or repeating; the schedule is written into
+  cron, so it fires even with the screen asleep
+* **Battery** — charge, charging state, drain rate and remaining time
+* **Info** — model, firmware, kernel, uptime, load, memory, storage, LAN
+* **Settings** — brightness, warm filter, language, 180° rotation, menu icons,
+  screensaver style and timeout, night schedule, LED, icon editor, panel tuning
+* **Screensavers** — widgets (three auto-rotating pages of cards), weather with
+  a big clock, plain clock, one-line header, Matrix rain and the Almond logo
+* **Night mode** — a schedule that dims the screen, warms the colours, switches
+  the screensaver to green and can turn the access points off until morning
+* **Power** — reboot, shutdown and a modem restart from the menu
 
 ## Hardware
 
@@ -46,6 +118,9 @@ ssh root@192.168.1.1
 apk add --allow-untrusted /tmp/kmod-lcd-almond3s-*.apk /tmp/lcd-ui-almond3s-*.apk
 reboot
 ```
+
+`nes-almond3s-*.apk` is the optional NES emulator — install it the same way if
+you want the Games page to run anything.
 
 **A kernel module is tied to the exact kernel build it was compiled against**
 (vermagic). The prebuilt `kmod` will refuse to load on any other OpenWrt
@@ -123,31 +198,10 @@ Weather is fetched by `/etc/almond3s/scripts/weather_fetch.sh` from wttr.in and 
 service pings by `/etc/almond3s/scripts/svcping.sh`; both are put on cron by the
 package on install.
 
-## What is on the screen
+## Notes on the pages
 
-* **Network** — WWAN and WAN addresses, Wi-Fi clients
-* **Network** — the uplink list from `netpri.sh`: modem, Wi-Fi STA, wired, with
-  their addresses and metrics. Tapping a card makes that uplink primary; the
-  switch itself is done entirely by 5gmodem, metric base included (100, or 10
-  with mwan3 compatibility)
-* **Wi-Fi** — SSIDs, clients, a QR code to join the network
-* **Modem** — operator, phone number, signal ladder, carrier aggregation,
-  temperature, and a second page with cell details (TAC, CID, bandwidth,
-  pathloss, CQI, MIMO, neighbouring cells)
-* **Traffic** — RX/TX with log-scaled history graphs
-* **Info** — uptime, load, memory, battery
-* **SMS** — the inbox read through `5gmodem`'s bridge: multipart messages are
-  glued back together, unread ones are marked, and a message opens full-screen
-  with paging when it does not fit. Reachable from the menu or by tapping the
-  envelope in the header. The unread mark subtracts `5gmodem`'s live `seen`
-  state, so the envelope clears the moment a message is read elsewhere
-  Opening a message marks it read through the same `seen-add` the web Inbox
-  uses, so the envelope clears everywhere at once
-* **Services** — reachability of YouTube, Telegram, GitHub and others; tapping a
-  card rechecks that one service immediately
-* **Weather** — current conditions with a city picker
-* **Display** — screensaver style and timeout, language, and a 180° screen
-  flip (done in the panel's MADCTL register, touch is mirrored with it)
+The page list is above; a few things worth knowing beyond it:
+
 * **LED** — the white LED above the screen: on/off, and blinking while unread
   SMS remain. It hangs off the PIC, not a GPIO (port E bit 4), so it is driven
   by `almond3s-lcd led on|off|blink`

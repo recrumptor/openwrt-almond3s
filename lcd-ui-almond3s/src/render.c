@@ -16,6 +16,7 @@
 #include <sys/un.h>
 #include <stdint.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #define LCD_W 320
 #define LCD_H 240
@@ -116,7 +117,7 @@ static const uint8_t font5x7[96][5] = {
     {0x36,0x49,0x55,0x22,0x50},{0x00,0x05,0x03,0x00,0x00},
     {0x00,0x1C,0x22,0x41,0x00},{0x00,0x41,0x22,0x1C,0x00},
     {0x14,0x08,0x3E,0x08,0x14},{0x08,0x08,0x3E,0x08,0x08},
-    {0x00,0x50,0x30,0x00,0x00},{0x08,0x08,0x08,0x08,0x08},
+    {0x00,0xA0,0x60,0x00,0x00},{0x08,0x08,0x08,0x08,0x08},
     {0x00,0x60,0x60,0x00,0x00},{0x20,0x10,0x08,0x04,0x02},
     {0x3E,0x51,0x49,0x45,0x3E},{0x00,0x42,0x7F,0x40,0x00},
     {0x42,0x61,0x51,0x49,0x46},{0x21,0x41,0x45,0x4B,0x31},
@@ -183,7 +184,7 @@ static const uint8_t font5x7_cyr[66][5] = {
     {0x7C,0x54,0x54,0x54,0x28},{0x7C,0x04,0x04,0x04,0x04},
     {0x60,0x38,0x24,0x3C,0x60},{0x38,0x54,0x54,0x54,0x18},
     {0x6C,0x10,0x7C,0x10,0x6C},{0x44,0x54,0x54,0x54,0x28},
-    {0x7C,0x20,0x10,0x08,0x7C},{0x78,0x24,0x14,0x0C,0x78},
+    {0x7C,0x20,0x10,0x08,0x7C},{0x7C,0x20,0x12,0x08,0x7C},
     {0x7C,0x10,0x28,0x44,0x00},{0x40,0x38,0x04,0x04,0x7C},
     {0x7C,0x08,0x10,0x08,0x7C},{0x7C,0x10,0x10,0x10,0x7C},
     {0x38,0x44,0x44,0x44,0x38},{0x7C,0x04,0x04,0x04,0x7C},
@@ -273,6 +274,48 @@ static int fz_char_mono(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int
 /* cp - код символа Unicode. Латиница берётся из font5x7, кириллица - из
    font5x7_cyr (порядок юникодный, индекс - арифметика), остальное ищем в
    font5x7_sym. */
+static const uint8_t *fb_glyph(unsigned cp)
+{
+    if (cp >= 0x0410 && cp <= 0x042F)      return font5x7_cyr[cp - 0x0410];
+    if (cp >= 0x0430 && cp <= 0x044F)      return font5x7_cyr[32 + (cp - 0x0430)];
+    if (cp == 0x0401)                      return font5x7_cyr[64];
+    if (cp == 0x0451)                      return font5x7_cyr[65];
+    if (cp > 0x7F) {
+        unsigned i;
+        for (i = 0; i < sizeof(font5x7_sym) / sizeof(font5x7_sym[0]); i++)
+            if (font5x7_sym[i].cp == cp) return font5x7_sym[i].g;
+        return font5x7[0];   /* нечем рисовать - пробел, а не мусор */
+    }
+    {
+        int idx = (int)cp - 32;
+        if (idx < 0 || idx > 95) idx = 0;
+        return font5x7[idx];
+    }
+}
+
+static int fb_tabular(unsigned cp)
+{
+    return (cp >= '0' && cp <= '9') || cp == '+' || cp == '-' || cp == '.'
+        || cp == ',' || cp == '=' || cp == '/' || cp == '%' || cp == 0x00B0;
+}
+
+static int fb_kern(const uint8_t *gp, const uint8_t *gc)
+{
+    int row, best = 1;
+    for (row = 0; row < 7; row++) {
+        unsigned mask = 1u << row;
+        int pr = -1, cl = 5, col;
+        if (row > 0) mask |= 1u << (row - 1);
+        if (row < 6) mask |= 1u << (row + 1);
+        for (col = 4; col >= 0; col--) if (gp[col] & mask) { pr = col; break; }
+        for (col = 0; col < 5; col++)  if (gc[col] & mask) { cl = col; break; }
+        if (pr < 0 || cl > 4) continue;
+        if ((6 + cl) - pr - 2 < best) best = (6 + cl) - pr - 2;
+    }
+    if (best < 0) best = 0;
+    return best;
+}
+
 static void fb_char(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int scale, int transp)
 {
     const uint8_t *g;
@@ -281,29 +324,17 @@ static void fb_char(int x, int y, unsigned cp, uint16_t fg, uint16_t bg, int sca
     if (font_mode == 1 && fz_char_mono(x, y, cp, fg, bg, scale, !transp))
         return;
 
-    if (cp >= 0x0410 && cp <= 0x042F)      g = font5x7_cyr[cp - 0x0410];
-    else if (cp >= 0x0430 && cp <= 0x044F) g = font5x7_cyr[32 + (cp - 0x0430)];
-    else if (cp == 0x0401)                 g = font5x7_cyr[64];
-    else if (cp == 0x0451)                 g = font5x7_cyr[65];
-    else if (cp > 0x7F) {
-        unsigned i;
-        g = NULL;
-        for (i = 0; i < sizeof(font5x7_sym) / sizeof(font5x7_sym[0]); i++)
-            if (font5x7_sym[i].cp == cp) { g = font5x7_sym[i].g; break; }
-        if (!g) g = font5x7[0];   /* нечем рисовать - пробел, а не мусор */
-    }
-    else {
-        int idx = (int)cp - 32;
-        if (idx < 0 || idx > 95) idx = 0;
-        g = font5x7[idx];
-    }
-    for (row = 0; row < 7; row++)
+    g = fb_glyph(cp);
+    /* 8 рядов: ряд7 (bit7) свободен во всех глифах, кроме запятой - она в него
+       свешивает хвост под базовую линию. bg-заливка только рядов 0-6, иначе row7
+       затирал бы пиксель под каждым символом. */
+    for (row = 0; row < 8; row++)
         for (sy = 0; sy < scale; sy++)
             for (col = 0; col < 5; col++)
                 for (sx = 0; sx < scale; sx++) {
                     if (g[col] & (1 << row))
                         fb_pixel(x + col*scale + sx, y + row*scale + sy, fg);
-                    else if (!transp)
+                    else if (!transp && row < 7)
                         fb_pixel(x + col*scale + sx, y + row*scale + sy, bg);
                 }
     /* space between chars - прозрачный текст его не закрашивает */
@@ -337,6 +368,11 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
             cp = *p;
             p++;
         }
+        if (font_mode != 1 && n > 0 && cp != ' ' && cps[n - 1] != ' '
+            && !(fb_tabular(cp) && fb_tabular(cps[n - 1]))) {
+            int kern = fb_kern(fb_glyph(cps[n - 1]), fb_glyph(cp));
+            if (kern) x -= kern * scale;
+        }
         cps[n] = cp; cx[n] = x; cy[n] = y;
         if (font_mode == 1) {
             const struct fz_glyph *g = fz_find(fz_hax_glyphs, FZ_HAX_COUNT, cp);
@@ -364,8 +400,15 @@ static void fb_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int s
         return;
     }
 
+    if (!transp) {
+        int row, sx;
+        for (i = 0; i < n; i++)
+            for (row = 0; row < 7 * scale; row++)
+                for (sx = 0; sx < 6 * scale; sx++)
+                    fb_pixel(cx[i] + sx, cy[i] + row, bg);
+    }
     for (i = 0; i < n; i++)
-        fb_char(cx[i], cy[i], cps[i], fg, bg, scale, transp);
+        fb_char(cx[i], cy[i], cps[i], fg, bg, scale, 1);
 }
 
 static void flush_cmd(void)

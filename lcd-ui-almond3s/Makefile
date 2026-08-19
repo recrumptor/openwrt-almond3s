@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lcd-ui-almond3s
-PKG_RELEASE:=346
+PKG_RELEASE:=413
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -32,6 +32,8 @@ define Build/Compile
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-o $(PKG_BUILD_DIR)/lcdshot $(PKG_BUILD_DIR)/lcdshot.c
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
+		-o $(PKG_BUILD_DIR)/almond3s-zig $(PKG_BUILD_DIR)/almond3s-zig.c
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-std=c99 -I$(PKG_BUILD_DIR)/vterm/include \
 		-o $(PKG_BUILD_DIR)/almond3s-term \
 		$(PKG_BUILD_DIR)/almond3s-term.c $(PKG_BUILD_DIR)/vterm/src/*.c \
@@ -48,6 +50,7 @@ define Package/lcd-ui-almond3s/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/render $(1)/usr/libexec/almond3s/render
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/collector $(1)/usr/libexec/almond3s/collector
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/almond3s-term $(1)/usr/libexec/almond3s/almond3s-term
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/almond3s-zig $(1)/usr/libexec/almond3s/almond3s-zig
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/ui.uc $(1)/usr/libexec/almond3s/ui.uc
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/almond3s-lcd.init $(1)/etc/init.d/almond3s-lcd
@@ -56,6 +59,7 @@ define Package/lcd-ui-almond3s/install
 	$(INSTALL_BIN) ./files/weather_geo.sh $(1)/etc/almond3s/scripts/weather_geo.sh
 	$(INSTALL_BIN) ./files/svcping.sh $(1)/etc/almond3s/scripts/svcping.sh
 	$(INSTALL_BIN) ./files/screen.sh $(1)/etc/almond3s/scripts/screen.sh
+	$(INSTALL_BIN) ./files/night_wifi.sh $(1)/etc/almond3s/scripts/night_wifi.sh
 	$(INSTALL_BIN) ./files/reboot.sh $(1)/etc/almond3s/scripts/reboot.sh
 	$(INSTALL_BIN) ./files/poweroff.sh $(1)/etc/almond3s/scripts/poweroff.sh
 	$(INSTALL_BIN) ./files/lte_reset.sh $(1)/etc/almond3s/scripts/lte_reset.sh
@@ -63,6 +67,8 @@ define Package/lcd-ui-almond3s/install
 	$(INSTALL_BIN) ./files/alarm_play.sh $(1)/etc/almond3s/scripts/alarm_play.sh
 	$(INSTALL_BIN) ./files/alarm_stop.sh $(1)/etc/almond3s/scripts/alarm_stop.sh
 	$(INSTALL_BIN) ./files/vpn_clash.sh $(1)/etc/almond3s/scripts/vpn_clash.sh
+	$(INSTALL_BIN) ./files/nes_run.sh $(1)/etc/almond3s/scripts/nes_run.sh
+	$(INSTALL_DIR) $(1)/etc/almond3s/roms
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/almond3s.config $(1)/etc/config/almond3s
 	# Нарисованные в редакторе иконки: кладём в /etc/almond3s/icons, откуда
