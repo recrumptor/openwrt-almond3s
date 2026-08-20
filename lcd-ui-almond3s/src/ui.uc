@@ -188,6 +188,7 @@ function bar_ease(key, target) {
     return bar_disp[key];
 }
 
+
 let HDR_H   = 22;
 let TG_LINK = "t.me/openwrt_fun";
 
@@ -205,6 +206,7 @@ let GEO_JSON = "/tmp/lcd_geo.json";   // ответ геокодера для п
 // Помогает: gcard() рисует карточку с акцентной полосой и возвращает координаты
 // для контента (ix/iy - левый-верх с внутренним отступом 10/8).
 let GX = 8, GR = 312, GW = 304, GY = 24, GB = 206, GG = 8;
+let ZIG_ROWS = 6;
 let GCOL = 148;                 // ширина колонки в 2-колоночной раскладке
 let GH = { xs: 40, s: 64, m: 88, l: 176 };   // набор высот карточек
 // gcard() определена ниже, после lcd_rect/lcd_text (ucode без hoisting).
@@ -420,6 +422,10 @@ let TR_RU = {
     "random": "случайный",
     "chip silent": "чип молчит",
     "own network": "своя сеть",
+    "coordinator": "координатор",
+    "this one": "это устройство",
+    "more devices": "ещё, показать:",
+    "router role": "маршрутизатор",
     "Overview": "Обзор",
     "Load": "Нагрузка",
     "1 min": "1 мин",
@@ -428,11 +434,60 @@ let TR_RU = {
     "Disk": "Диск",
     "Uptime short": "Аптайм",
     "Operator": "Оператор",
+    "Cell": "Сота",
+    "Online": "На связи",
+    "Quality": "Качество",
     "Temp": "Темп",
     "charging": "заряжается",
     "online": "на связи",
     "on battery": "от батареи",
     "clients": "клиентов",
+    "Telemetry": "Телеметрия",
+    "Permit short": "Приём",
+    "pairing window open": "Приём открыт на 4 минуты",
+    "looking for a network": "ищу сеть в эфире…",
+    "chip free for other software": "выкл, чип свободен для другого ПО",
+    "Broker": "Брокер",
+    "Port": "Порт",
+    "User": "Логин",
+    "Password": "Пароль",
+    "адрес или имя": "адрес или имя",
+    "по умолчанию 1883": "по умолчанию 1883",
+    "если брокер требует": "если брокер требует",
+    "хранится в настройках": "хранится в настройках",
+    "publishing on": "публикация включена",
+    "publishing off": "публикация выключена, нажмите",
+    "joined the network": "вступил в сеть",
+    "join failed": "вступить не вышло",
+    "network not found": "сеть не найдена",
+    "key not received": "ключ не получен",
+    "rejected": "координатор отказал",
+    "MQTT broker": "Брокер MQTT",
+    "Type value": "Введите значение",
+    "Form short": "Поднять",
+    "Join short": "Вступить",
+    "Leave short": "Выйти",
+    "Flash short": "Прошить",
+    "set broker address first": "Сначала задайте адрес брокера",
+    "MQTT on": "MQTT включён:",
+    "MQTT off": "MQTT выключен",
+    "Join network": "Вступить",
+    "beacon": "маячок",
+    "network": "по сети",
+    "via Zigbee network": "через сеть Zigbee",
+    "standalone, no network": "сама по себе, без сети",
+    "tap to enable": "нажмите, чтобы включить",
+    "Update chip": "Прошить",
+    "Update Zigbee chip?": "Прошить чип Zigbee?",
+    "Takes about a minute.": "Займёт около минуты.",
+    "Factory version cannot be restored.": "Вернуть заводскую версию будет нельзя.",
+    "Do not power off.": "Не выключайте питание.",
+    "Updating chip...": "Прошиваю",
+    "Chip updated": "Чип прошит",
+    "no firmware in image": "прошивки нет в образе",
+    "VPN off": "ВПН выкл",
+    "VPN on": "ВПН вкл",
+    "Sent": "Отправлено",
     "new msgs": "новых",
     "signal": "сигнал",
     "blink on SMS": "мигание при SMS",
@@ -744,6 +799,42 @@ function strip_ctrl(str) {
     return out;
 }
 
+let SEG_W = 5, SEG_GAP = 2;
+
+function seg_geom(len, sw) {
+    let n = int(len / ((sw ?? SEG_W) + SEG_GAP));
+    if (n < 1) n = 1;
+    let pitch = int(len / n);
+    let sz = pitch - SEG_GAP;
+    if (sz < 1) sz = pitch;
+    return { n: n, pitch: pitch, sz: sz };
+}
+
+function seg_lit(n, pct) {
+    let on = int((n * pct + 50) / 100);
+    if (pct > 0 && on < 1) on = 1;
+    if (on > n) on = n;
+    return on;
+}
+
+function seg_bar(x, y, w, h, pct, col, bg, key) {
+    let p = clampi(int(pct), 0, 100);
+    if (key != null) p = clampi(bar_ease(key, p), 0, 100);
+    let g = seg_geom(w);
+    let on = seg_lit(g.n, p);
+    for (let i = 0; i < g.n; i++)
+        lcd_rect(x + i * g.pitch, y, g.sz, h, i < on ? col : bg);
+}
+
+function seg_vbar(x, y, w, h, pct, col, bg, key, sw) {
+    let p = clampi(int(pct), 0, 100);
+    if (key != null) p = clampi(bar_ease(key, p), 0, 100);
+    let g = seg_geom(h, sw);
+    let on = seg_lit(g.n, p);
+    for (let i = 0; i < g.n; i++)
+        lcd_rect(x, y + h - i * g.pitch - g.sz, w, g.sz, i < on ? col : bg);
+}
+
 function lcd_text(x, y, text, color, bg, sz) {
     // Экранируем для JSON и УБИРАЕМ все сырые контрол-символы. Команды к render.c
     // разделяются живым \n, поэтому \n в тексте превращаем в литеральный \\n
@@ -789,6 +880,18 @@ function gcard_pos(x, y, w, h) {
 }
 
 // Native socket — connect/send/close per flush (fast, no deadlock)
+function lcd_raw(cmd) {
+    let s;
+    try {
+        s = create_socket(AF_UNIX, SOCK_STREAM, 0);
+        s.connect(SOCK_PATH);
+        s.send(cmd + "\n");
+        s.close();
+    } catch(e) {
+        try { s.close(); } catch(e2) {}
+    }
+}
+
 function lcd_flush() {
     // Активный тост дорисовываем поверх любого кадра: так неблокирующая полоса
     // держится, даже если вызывающий после toast() сразу перерисовал страницу.
@@ -800,7 +903,7 @@ function lcd_flush() {
     }
     if (!length(cmds)) return;
     unshift(cmds, sprintf('{"cmd":"fontmode","mode":%d}', FONT_MODE));
-    push(cmds, '{"cmd":"flush"}');
+    if (!st.no_flush) push(cmds, '{"cmd":"flush"}');
     let payload = join("\n", cmds) + "\n";
     cmds = [];
 
@@ -2192,12 +2295,13 @@ function st_icon_w(name, def) {
     return cu ? cu.w : length(def[0]);
 }
 
-function draw_st_icon(x, y, name, def, col) {
+function draw_st_icon(x, y, name, def, col, flat) {
     let cu = MICON_CUSTOM[name];
     if (cu) {
         for (let r = 0; r < cu.h; r++)
             for (let c = 0; c < cu.w; c++)
-                if (cu.g[r][c]) lcd_rect(x + c, y + r, 1, 1, cu.pal[cu.g[r][c] - 1]);
+                if (cu.g[r][c])
+                    lcd_rect(x + c, y + r, 1, 1, flat ? col : cu.pal[cu.g[r][c] - 1]);
         return;
     }
     for (let r = 0; r < length(def); r++) {
@@ -2207,12 +2311,13 @@ function draw_st_icon(x, y, name, def, col) {
     }
 }
 
-function draw_wifi_status(x, y, col) {
+function draw_wifi_status(x, y, col, flat) {
     let cu = MICON_CUSTOM["wifi_st"];
     if (cu) {
         for (let r = 0; r < cu.h; r++)
             for (let c = 0; c < cu.w; c++)
-                if (cu.g[r][c]) lcd_rect(x + c, y + r, 1, 1, cu.pal[cu.g[r][c] - 1]);
+                if (cu.g[r][c])
+                    lcd_rect(x + c, y + r, 1, 1, flat ? col : cu.pal[cu.g[r][c] - 1]);
         return;
     }
     for (let r = 0; r < length(WIFI_ST_DEF); r++) {
@@ -2240,12 +2345,13 @@ let ETH_DEF = [
     "...............",
     "...............",
 ];
-function draw_eth_icon(x, y, col) {
+function draw_eth_icon(x, y, col, flat) {
     let cu = MICON_CUSTOM["eth"];
     if (cu) {
         for (let r = 0; r < cu.h; r++)
             for (let c = 0; c < cu.w; c++)
-                if (cu.g[r][c]) lcd_rect(x + c, y + r, 1, 1, cu.pal[cu.g[r][c] - 1]);
+                if (cu.g[r][c])
+                    lcd_rect(x + c, y + r, 1, 1, flat ? col : cu.pal[cu.g[r][c] - 1]);
         return;
     }
     for (let r = 0; r < length(ETH_DEF); r++) {
@@ -2284,7 +2390,8 @@ function draw_fn_icon(x, y, col) {
     if (cu) {
         for (let r = 0; r < cu.h; r++)
             for (let c = 0; c < cu.w; c++)
-                if (cu.g[r][c]) lcd_rect(x + c, y + r, 1, 1, cu.pal[cu.g[r][c] - 1]);
+                if (cu.g[r][c])
+                    lcd_rect(x + c, y + r, 1, 1, flat ? col : cu.pal[cu.g[r][c] - 1]);
         return;
     }
     for (let r = 0; r < length(FN_DEF); r++) {
@@ -2360,9 +2467,9 @@ function draw_status_row(y, o) {
         draw_sigbars(4, y, sig.bars, mono ?? sig.color, empty);
         if (kind == "wifi") {
             // Значок Wi-Fi из редактируемой сетки wifi_st (правки видны вживую).
-            draw_wifi_status(50, y, mono ?? C.cyan);
+            draw_wifi_status(50, y, mono ?? C.cyan, mono != null);
         } else if (kind == "wan") {
-            draw_eth_icon(50, y, mono ?? C.cyan);
+            draw_eth_icon(50, y, mono ?? C.cyan, mono != null);
         } else {
             let rat = tcut(rat_label(d?.lte?.mode ?? ""), 4);
             if (rat != "" && rat != "-")
@@ -2429,12 +2536,12 @@ function draw_status_row(y, o) {
     let cur = st.alarm_on ? bell_x - 9 : bell_x + 11;
     if (st.vpn_on) {
         cur -= st_icon_w("vpn", VPN_ST_DEF);
-        draw_st_icon(cur, y + 1, "vpn", VPN_ST_DEF, "#FFFFFF");
+        draw_st_icon(cur, y + 1, "vpn", VPN_ST_DEF, mono ?? "#FFFFFF", mono != null);
         cur -= 5;
     }
     if (night_now()) {
         cur -= st_icon_w("moon", MOON_ST_DEF);
-        draw_st_icon(cur, y + 1, "moon", MOON_ST_DEF, mono ?? "#8B949E");
+        draw_st_icon(cur, y + 1, "moon", MOON_ST_DEF, mono ?? "#8B949E", mono != null);
     }
 }
 
@@ -5091,6 +5198,20 @@ function draw_kbd_page() {
         lcd_flush();
         return;
     }
+    if (st.kbmode == "mqtt") {
+        let fk = st.kbfield ?? "host";
+        let ttl = fk == "host" ? tr("Broker") : (fk == "port" ? tr("Port") :
+                  (fk == "user" ? tr("User") : tr("Password")));
+        draw_header(sprintf("MQTT: %s", ttl));
+        lcd_rect(10, 30, 300, 30, C.widget);
+        let v = st.mqttbuf ?? "";
+        lcd_text(18, 38, v != "" ? v : tr("Type value"),
+                 v != "" ? C.white : C.dim, C.widget, 2);
+        kb_draw(92, st.citykb);
+        draw_back();
+        lcd_flush();
+        return;
+    }
     let n = sta.sel >= 0 ? sta.nets[sta.sel] : null;
     draw_header(tcut(n ? n.ssid : tr("Password"), 24));
 
@@ -5665,6 +5786,9 @@ function zig_name() {
 }
 
 let ZIG_TELE = "/tmp/lcd_zig_tele.json";
+let TELE_SELF = "/tmp/almond_tele.json";
+let TELE_MODEM = "/tmp/5gmodem_tele.json";
+let TELE_STALE = 90;
 
 // Телеметрия для маячка: плоский набор чисел, который он упакует в эфир.
 // Считает интерфейс - у него уже всё разобрано, а в C дублировать разбор
@@ -5674,32 +5798,26 @@ function zig_tele_write() {
     if (!d) return;
     let bt = d.battery, tot = int(+(d.mem_total_mb ?? 0)), fr = int(+(d.mem_free_mb ?? 0));
     let stot = int(+(d.storage?.total_kb ?? 0)), sfr = int(+(d.storage?.free_kb ?? 0));
-    let rx = length(hist.rx) > 0 ? hist.rx[length(hist.rx) - 1] : 0;
-    let tx = length(hist.tx) > 0 ? hist.tx[length(hist.tx) - 1] : 0;
     let nc = type(d.wifi?.clients) == "array" ? length(d.wifi.clients) : 0;
-    let sp = int(+(d.lte?.signal ?? 0));
-    if (sp <= 0) {
-        let r = int(+(d.lte?.rsrp ?? 0));
-        sp = r != 0 ? clampi(int(MET.rsrp.bar(r)), 0, 100) : 0;
+    let tele = {};
+
+    let pc = int(+(bt?.percent ?? -1));
+    if (pc >= 0) {
+        tele.batt = clampi(pc, 0, 100);
+        tele.chg = bt?.charging ? 1 : 0;
     }
-    let tele = {
-        sig:  clampi(sp, 0, 100),
-        rsrp: int(+(d.lte?.rsrp ?? 0)),
-        batt: int(+(bt?.percent ?? -1)),
-        chg:  bt?.charging ? 1 : 0,
-        cpu:  int(+(d.cpu_busy ?? 0)),
-        mem:  tot > 0 ? int((tot - fr) * 100 / tot) : 0,
-        disk: stot > 0 ? int((stot - sfr) * 100 / stot) : 0,
-        up:   int(int(+(d.uptime ?? 0)) / 60),
-        wifi: nc,
-        ping: int(+(d.ping?.google_ms ?? -1)),
-        sms:  int(+(d.sms_new ?? 0)),
-        rx:   int(rx),
-        tx:   int(tx),
-        temp: int(+(d.lte?.temp ?? 0)),
-        vpn:  st.vpn_on ? 1 : 0,
-    };
-    fs.writefile(ZIG_TELE, sprintf("%J\n", tele));
+    if (d.cpu_busy != null) tele.cpu = clampi(int(+d.cpu_busy), 0, 100);
+    if (tot > 0) tele.mem = clampi(int(((tot - fr) * 100 + tot / 2) / tot), 0, 100);
+    if (stot > 0) tele.disk = clampi(int(((stot - sfr) * 100 + stot / 2) / stot), 0, 100);
+    if (d.uptime != null) tele.up = int((int(+d.uptime) + 30) / 60);
+    tele.wifi = nc;
+    if (st.vpn_on != null) tele.vpn = st.vpn_on ? 1 : 0;
+    if (st.vpn_on && st.vpn_node != null && st.vpn_node != "")
+        tele.vpn_node = tcut(st.vpn_node, 16);
+
+    let tmp = TELE_SELF + ".tmp";
+    fs.writefile(tmp, sprintf("%J\n", tele));
+    system(sprintf("mv %s %s", tmp, TELE_SELF));
 }
 
 function zig_beacon_stop() {
@@ -5707,6 +5825,11 @@ function zig_beacon_stop() {
 }
 
 let ZIG_KEYFILE = "/tmp/.zig_key";
+
+function zig_mode() {
+    let v = ucur ? ucur.get("almond3s", "zigbee", "mode") : null;
+    return v == "mesh" ? "mesh" : "beacon";
+}
 
 function zig_beacon_start() {
     let c = zig_cfg();
@@ -5720,8 +5843,12 @@ function zig_beacon_start() {
     } else {
         fs.unlink(ZIG_KEYFILE);
     }
-    system(sprintf("setsid %s beacon %d 10 %s >/dev/null 2>&1 </dev/null &",
-                   ZIG_BIN, c.ch, zig_name()));
+    if (zig_mode() == "mesh")
+        system(sprintf("ZIG_POWER=%d setsid %s mesh 30 %s >/dev/null 2>&1 </dev/null &",
+                       c.power, ZIG_BIN, zig_name()));
+    else
+        system(sprintf("ZIG_POWER=%d setsid %s beacon %d 10 %s >/dev/null 2>&1 </dev/null &",
+                       c.power, ZIG_BIN, c.ch, zig_name()));
 }
 
 function zig_set(k, v) {
@@ -5746,7 +5873,8 @@ function zig_run(cmd, out, arg) {
     st.zig.cmd = cmd;
     let st0 = fs.stat(out);
     st.zig.mt = st0 ? st0.mtime : 0;
-    system(sprintf("%s %s %s > %s 2>/dev/null &", ZIG_BIN, cmd, arg ?? "", out));
+    system(sprintf("(%s %s %s > %s.tmp 2>/dev/null; mv %s.tmp %s) </dev/null &",
+                   ZIG_BIN, cmd, arg ?? "", out, out, out));
 }
 
 function zig_busy() {
@@ -5754,13 +5882,45 @@ function zig_busy() {
     if (!z || !z.busy) return false;
     let out = z.cmd == "ascan" ? ZIG_ASCAN : (z.cmd == "escan" ? ZIG_ESCAN : ZIG_INFO);
     let ss = fs.stat(out);
-    if ((ss && ss.mtime != z.mt) || (time() - z.busy) > 30) { z.busy = 0; return false; }
+    if ((ss && ss.mtime != z.mt) || (time() - z.busy) > 45) { z.busy = 0; return false; }
     return true;
 }
 
 function zig_btn(i) {
     let w = int((GW - 2 * GG) / 3);
     return { x: GX + i * (w + GG), y: BACK_Y - 38, w: w, h: 32 };
+}
+
+function icon_home(x, y, col, bg) {
+    for (let i = 0; i < 4; i++) lcd_rect(x + 4 - i, y + i, 1 + 2 * i, 1, col);
+    lcd_rect(x + 1, y + 4, 7, 5, col);
+    lcd_rect(x + 3, y + 6, 3, 3, bg);
+}
+
+function zig_rssi_bar(v) {
+    return clampi(int((int(v) + 95) * 100 / 50), 0, 100);
+}
+
+function zig_rssi_col(v) {
+    let r = int(v);
+    return r >= -70 ? C.green : (r >= -85 ? C.orange : C.red);
+}
+
+function zig_rows() {
+    let d = zig_json(ZIG_PEERS);
+    let peers = type(d?.peers) == "array" ? d.peers : [];
+    let mnode = int(+(d?.node ?? 0));
+    let rows = [];
+    if (mnode > 0)
+        push(rows, { name: d?.me ?? zig_name(), self: true, coord: mnode == 1, pi: -1 });
+    for (let i = 0; i < length(peers); i++) {
+        let pp = peers[i];
+        push(rows, { name: pp.name ?? "?", self: false,
+                     coord: mnode > 0 && int(+(pp.m?.node ?? 0)) == 1,
+                     rssi: int(+(pp.rssi ?? 0)), lqi: int(+(pp.lqi ?? 0)),
+                     age: int(+(pp.age ?? 999)), pi: i });
+    }
+    return rows;
 }
 
 function draw_zigbee_page() {
@@ -5823,24 +5983,42 @@ function draw_zigbee_page() {
         let d = zig_json(ZIG_PEERS);
         let peers = type(d?.peers) == "array" ? d.peers : [];
         let on = zig_cfg().beacon;
-        lcd_text(GX + 12, ay + 6, on ? sprintf("%s: %s, %s %d", tr("Beacon"), d?.me ?? zig_name(),
-                 tr("Channel"), d?.ch ?? zig_cfg().ch) : tr("beacon off"),
-                 on ? C.green : C.dim, C.widget, 1);
-        if (length(peers) == 0) {
+        let mesh = int(+(d?.node ?? 0)) > 0;
+        let rows = zig_rows();
+        if (mesh) {
+            icon_home(GX + 12, ay + 5, C.cyan, C.widget);
+            lcd_text(GX + 26, ay + 6, tr("coordinator"), C.dim, C.widget, 1);
+        } else {
+            lcd_text(GX + 12, ay + 6, on ? sprintf("%s: %s, %s %d", tr("Beacon"),
+                     d?.me ?? zig_name(), tr("Channel"), d?.ch ?? zig_cfg().ch)
+                     : tr("beacon off"), on ? C.green : C.dim, C.widget, 1);
+        }
+        if (length(rows) == 0) {
             lcd_text(GX + 12, ay + 26, on ? tr("no peers heard") : tr("off"), C.dim, C.widget, 2);
         } else {
-            for (let i = 0; i < length(peers) && i < 5; i++) {
-                let n = peers[i], y = ay + 24 + i * 20;
-                let fresh = int(+(n.age ?? 999)) < 30;
-                lcd_text(GX + 12, y, tcut(n.name ?? "?", 14), fresh ? C.white : C.dim, C.widget, 1);
-                let bw = 60, fill = clampi(int(+(n.lqi ?? 0)) * bw / 255, 0, bw);
-                lcd_rect(GX + 110, y, bw, 7, C.btn);
-                if (fill > 0) lcd_rect(GX + 110, y, fill, 7, fresh ? C.green : C.dim);
-                lcd_text(GX + 180, y, sprintf("%d dBm", int(+(n.rssi ?? 0))),
-                         fresh ? C.cyan : C.dim, C.widget, 1);
-                lcd_text(GX + 250, y, sprintf("%d %s", int(+(n.age ?? 0)), tr("sec")),
-                         C.dim, C.widget, 1);
+            let more = length(rows) > ZIG_ROWS;
+            let show = more ? ZIG_ROWS - 1 : length(rows);
+            let off = (st.zig?.poff ?? 0) % length(rows);
+            for (let k = 0; k < show; k++) {
+                let n = rows[(off + k) % length(rows)], y = ay + 24 + k * 17;
+                let fresh = n.self || n.age < 30;
+                let col = n.coord ? C.cyan : (fresh ? C.white : C.dim);
+                if (n.coord) icon_home(GX + 12, y - 1, C.cyan, C.widget);
+                lcd_text(GX + 26, y, tcut(n.name, 12), col, C.widget, 1);
+                if (n.self) {
+                    lcd_text(GX + 110, y, tr("this one"), C.dim, C.widget, 1);
+                    continue;
+                }
+                let zc = fresh ? zig_rssi_col(n.rssi) : C.dim;
+                seg_bar(GX + 110, y, 60, 7, zig_rssi_bar(n.rssi),
+                        zc, C.btn, "zl" + n.name);
+                lcd_text(GX + 180, y, sprintf("%d dBm", n.rssi), zc, C.widget, 1);
+                lcd_text(GX + 250, y, sprintf("%d %s", n.age, tr("sec")), C.dim, C.widget, 1);
             }
+            if (more)
+                lcd_text(GX + 26, ay + 24 + show * 17,
+                         sprintf("%s %d", tr("more devices"), length(rows) - show),
+                         C.orange, C.widget, 1);
         }
     }
 
@@ -5862,59 +6040,165 @@ function zig_peer_row(i) {
     return { x: GX, y: GY + 32 + i * 20, w: GW, h: 18 };
 }
 
+let A_CYAN = "#58A6FF", A_GREEN = "#3FB950", A_ORANGE = "#E8853A",
+    A_PURPLE = "#A371F7", A_TEAL = "#39C5CF", A_PINK = "#DB61A2";
+
+function dash_card(b, o, acc) {
+    lcd_rect(b.x, b.y, b.w, b.h, o.card);
+    lcd_rect(b.x, b.y, 3, b.h, o.mono ?? (acc ?? C.dim));
+}
+
+function dash_lab(b, o, s) {
+    lcd_text(b.x + 12, b.y + 6, s, o.dim, o.card, 1);
+}
+
+function dash_right(b, o, y, s, col) {
+    lcd_text(b.x + b.w - 11 - tlen(s) * 6, y, s, o.mono ?? (col ?? o.dim), o.card, 1);
+}
+
+function dash_val(b, o, s, col) {
+    let sz = (tlen(s) * 12 <= b.w - 24) ? 2 : 1;
+    lcd_text(b.x + 12, b.y + (sz == 2 ? 19 : 22), s, o.mono ?? (col ?? o.fg), o.card, sz);
+}
+
+function dash_sub(b, o, s) {
+    lcd_text(b.x + 12, b.y + b.h - 13, s, o.dim, o.card, 1);
+}
+
+function dash_bar(b, o, pct, col, key) {
+    seg_bar(b.x + 12, b.y + b.h - 12, b.w - 24, 5, pct, o.mono ?? col,
+            o.mono ? "#0A2A16" : C.btn, key);
+}
+
+function dash_simple(b, o, acc, label, val, sub, col) {
+    dash_card(b, o, acc);
+    dash_lab(b, o, label);
+    dash_val(b, o, val, col);
+    if (sub != null && sub != "") dash_sub(b, o, sub);
+}
+
+function dash_gauge(b, o, acc, label, val, pct, col) {
+    dash_card(b, o, acc);
+    dash_lab(b, o, label);
+    dash_val(b, o, val, col);
+    dash_bar(b, o, pct, col, sprintf("g%d_%d_%s", b.x, b.y, label));
+}
+
+function dash_sig_pct(d) {
+    let sp = int(+(d?.lte?.signal ?? 0));
+    if (sp > 0) return clampi(sp, 0, 100);
+    let rsrp = int(+(d?.lte?.rsrp ?? d?.uqmi?.rsrp ?? 0));
+    return rsrp != 0 ? clampi(int(MET.rsrp.bar(rsrp)), 0, 100) : -1;
+}
+
+function dash_lvl_col(pct) {
+    return pct < 0 ? C.dim : (pct >= 60 ? C.green : (pct >= 30 ? C.orange : C.red));
+}
+
+function zp_box(c, r, cw) {
+    let u = int((GW - 18) / 4);
+    return { x: GX + c * (u + 6), y: GY + r * 56,
+             w: cw * u + (cw - 1) * 6, h: 50 };
+}
+
+function zp_act(i) {
+    let w = int(LCD_W / 4);
+    return { x: i * w, y: BACK_Y, w: w, h: 32 };
+}
+
 function draw_zigpeer_page() {
     lcd_clear(C.bg);
     let d = zig_json(ZIG_PEERS);
     let peers = type(d?.peers) == "array" ? d.peers : [];
     let n = peers[st.zig?.peer ?? 0];
-    draw_header(tr("Peers"));
     if (n == null) {
+        draw_header(tr("Peers"));
         lcd_text(GX + 12, GY + 20, tr("no peers heard"), C.dim, C.bg, 2);
         draw_back();
         lcd_flush();
         return;
     }
+    draw_header(tcut(n.name ?? "?", 18));
 
-    let hb = { x: GX, y: GY, w: GW, h: 26 };
-    lcd_rect(hb.x, hb.y, hb.w, hb.h, C.widget);
-    lcd_rect(hb.x, hb.y, 3, hb.h, int(+(n.age ?? 99)) < 30 ? C.green : C.dim);
-    lcd_text(hb.x + 12, hb.y + 9, tcut(n.name ?? "?", 16), C.white, C.widget, 1);
-    lcd_text(hb.x + hb.w - 11 - tlen(sprintf("%s %d dBm  LQI %d  %d %s", tr("link"),
-             int(+(n.rssi ?? 0)), int(+(n.lqi ?? 0)), int(+(n.age ?? 0)), tr("sec"))) * 6,
-             hb.y + 9, sprintf("%s %d dBm  LQI %d  %d %s", tr("link"), int(+(n.rssi ?? 0)),
-             int(+(n.lqi ?? 0)), int(+(n.age ?? 0)), tr("sec")), C.gray, C.widget, 1);
-
+    let o = { card: C.widget, dim: C.dim, fg: C.white, bg: C.bg };
     let m = n.m ?? {};
-    let cells = [
-        [ tr("Signal"), m.sig != null ? sprintf("%d%%", int(+m.sig)) : "--",
-          m.rsrp != null ? sprintf("%d dBm", int(+m.rsrp)) : "" ],
-        [ tr("Battery"), m.batt != null ? sprintf("%d%%", int(+m.batt)) : "--",
-          int(+(m.chg ?? 0)) == 1 ? tr("charging") : tr("on battery") ],
-        [ "CPU", m.cpu != null ? sprintf("%d%%", int(+m.cpu)) : "--",
-          m.mem != null ? sprintf("%s %d%%", tr("Memory"), int(+m.mem)) : "" ],
-        [ tr("Ping"), m.ping != null ? sprintf("%d %s", int(+m.ping), tr("ms")) : "--",
-          m.temp != null ? sprintf("%d°C", int(+m.temp)) : "" ],
-        [ tr("Uptime short"), m.up != null ? fmt_uptime(int(+m.up) * 60) : "--",
-          m.disk != null ? sprintf("%s %d%%", tr("Disk"), int(+m.disk)) : "" ],
-        [ "VPN", int(+(m.vpn ?? 0)) == 1 ? tr("on") : tr("off"),
-          m.wifi != null ? sprintf("Wi-Fi %d", int(+m.wifi)) : "" ],
+
+    let b = zp_box(0, 0, 2);
+    let sp = m.sig != null ? int(+m.sig) : -1;
+    let scol = dash_lvl_col(sp);
+    let oper = m.oper != null && m.oper != "" ? m.oper : tr("Signal");
+    dash_gauge(b, o, scol, tcut(oper, 16), sp >= 0 ? sprintf("%d%%", sp) : "--",
+               sp >= 0 ? sp : 0, scol);
+    if (m.rsrp != null) dash_right(b, o, b.y + 6, sprintf("%d dBm", int(+m.rsrp)), A_CYAN);
+
+    b = zp_box(2, 0, 1);
+    let von = int(+(m.vpn ?? 0)) == 1;
+    dash_simple(b, o, von ? A_PURPLE : C.dim, "VPN", von ? tr("on") : tr("off"), null,
+                von ? A_PURPLE : o.dim);
+
+    b = zp_box(3, 0, 1);
+    let pc = m.batt != null ? int(+m.batt) : -1;
+    let bcol = pc < 0 ? C.dim : (pc >= 40 ? C.green : (pc >= 15 ? C.orange : C.red));
+    dash_gauge(b, o, bcol, tr("Battery"),
+               pc >= 0 ? sprintf("%d%%%s", pc, int(+(m.chg ?? 0)) == 1 ? "+" : "") : "--",
+               pc >= 0 ? pc : 0, bcol);
+
+    b = zp_box(0, 1, 1);
+    let ms = m.ping != null ? int(+m.ping) : -1;
+    let pcol = ms < 0 ? C.dim : (ms < 80 ? C.green : (ms < 250 ? C.orange : C.red));
+    dash_simple(b, o, pcol, tr("Ping"), ms >= 0 ? sprintf("%d", ms) : "--", tr("ms"), pcol);
+
+    b = zp_box(1, 1, 1);
+    let cp = m.cpu != null ? int(+m.cpu) : -1;
+    let ccol = cp < 0 ? C.dim : (cp >= 85 ? C.orange : C.cyan);
+    dash_gauge(b, o, ccol, "CPU", cp >= 0 ? sprintf("%d%%", cp) : "--",
+               cp >= 0 ? cp : 0, ccol);
+
+    b = zp_box(2, 1, 1);
+    let mm = m.mem != null ? int(+m.mem) : -1;
+    let mcol = mm < 0 ? C.dim : (mm >= 85 ? C.orange : C.cyan);
+    dash_gauge(b, o, mcol, tr("Memory"), mm >= 0 ? sprintf("%d%%", mm) : "--",
+               mm >= 0 ? mm : 0, mcol);
+
+    b = zp_box(3, 1, 1);
+    let tv = m.temp != null ? int(+m.temp) : 0;
+    let tcol = tv == 0 ? C.dim : (tv >= 70 ? C.red : A_ORANGE);
+    dash_simple(b, o, tcol, tr("Temp"), tv != 0 ? sprintf("%d°C", tv) : "--",
+                tr("Modem"), tcol);
+
+    b = zp_box(0, 2, 2);
+    let fresh = int(+(n.age ?? 99)) < 30;
+    let lq = int(+(n.lqi ?? 0));
+    dash_gauge(b, o, fresh ? A_GREEN : C.dim, tr("link"),
+               sprintf("%d dBm", int(+(n.rssi ?? 0))), int(lq * 100 / 255),
+               fresh ? C.green : C.dim);
+    dash_right(b, o, b.y + 6, sprintf("%d %s", int(+(n.age ?? 0)), tr("sec")));
+
+    b = zp_box(2, 2, 1);
+    dash_simple(b, o, A_PURPLE, tr("Uptime short"),
+                m.up != null ? fmt_uptime(int(+m.up) * 60) : "--", null, o.fg);
+
+    b = zp_box(3, 2, 1);
+    let nc = m.wifi != null ? int(+m.wifi) : -1;
+    let wcol = nc > 0 ? A_TEAL : C.dim;
+    dash_simple(b, o, wcol, "Wi-Fi", nc >= 0 ? sprintf("%d", nc) : "--", tr("clients"), wcol);
+
+    let acts = [
+        [ von ? tr("VPN off") : tr("VPN on"), von ? A_PURPLE : C.gray ],
+        [ tr("Modem"), A_ORANGE ],
+        [ tr("Reboot"), "#F0736B" ],
+        [ tr("< BACK"), C.white ],
     ];
-    let cw = int((GW - GG) / 2);
-    for (let i = 0; i < length(cells); i++) {
-        let cx = GX + (i % 2) * (cw + GG), cy = GY + 32 + int(i / 2) * 40;
-        lcd_rect(cx, cy, cw, 36, C.widget);
-        lcd_rect(cx, cy, 3, 36, C.cyan);
-        lcd_text(cx + 12, cy + 5, cells[i][0], C.dim, C.widget, 1);
-        lcd_text(cx + 12, cy + 18, cells[i][1], C.white, C.widget, 2);
-        if (cells[i][2] != "")
-            lcd_text(cx + cw - 11 - tlen(cells[i][2]) * 6, cy + 22, cells[i][2],
-                     C.gray, C.widget, 1);
+    for (let i = 0; i < 4; i++) {
+        let a = zp_act(i);
+        lcd_rect(a.x, a.y, a.w, a.h, i == 3 ? C.back : C.widget);
+        lcd_rect(a.x, a.y, a.w, 2, i == 3 ? "#D32F2F" : acts[i][1]);
+        lcd_text(a.x + int((a.w - tlen(acts[i][0]) * 6) / 2), a.y + 12, acts[i][0],
+                 acts[i][1], i == 3 ? C.back : C.widget, 1);
     }
-    draw_back();
     lcd_flush();
 }
-
-let ZIG_POWERS = [ -8, 0, 3, 8, 20 ];
+let ZIG_POWERS = [ -8, 0, 3, 5, 8 ];
 
 function zigset_row(i) {
     return { x: GX, y: GY + i * 27, w: GW, h: 24 };
@@ -5926,8 +6210,120 @@ function zigset_pm(i, plus) {
 }
 
 function zigset_act(i) {
-    return { x: GX + i * (int((GW - GG) / 2) + GG), y: BACK_Y - 38,
-             w: int((GW - GG) / 2), h: 32 };
+    let w = int((GW - 3 * GG) / 4);
+    return { x: GX + i * (w + GG), y: BACK_Y - 38, w: w, h: 32 };
+}
+
+function zig_btn_fx(b, label, accent) {
+    lcd_rect(b.x, b.y, b.w, b.h, C.press);
+    lcd_rect(b.x, b.y, 3, b.h, accent ?? C.gray);
+    let inner = b.w - 12;
+    let w = tlen(label) * 6;
+    lcd_text(b.x + 7 + (w < inner ? int((inner - w) / 2) : 0), b.y + 12,
+             tcut(label, int(inner / 6)), C.white, C.press, 1);
+    lcd_flush();
+    sock_poll(70);
+}
+
+function mqtt_cfg() {
+    let g = function(k, d) {
+        let v = ucur ? ucur.get("almond3s", "mqtt", k) : null;
+        return (v == null || v == "") ? d : v;
+    };
+    return {
+        on:   g("enabled", "0") == "1",
+        host: g("host", ""),
+        port: g("port", "1883"),
+        user: g("user", ""),
+        pass: g("pass", ""),
+    };
+}
+
+function mqtt_set(k, v) {
+    if (!ucur) return;
+    ucur.set("almond3s", "mqtt", k, sprintf("%s", v));
+    ucur.commit("almond3s");
+}
+
+let MQTT_FIELDS = [
+    { key: "host", label: "Broker", hint: "адрес или имя" },
+    { key: "port", label: "Port",   hint: "по умолчанию 1883" },
+    { key: "user", label: "User",   hint: "если брокер требует" },
+    { key: "pass", label: "Password", hint: "хранится в настройках" },
+];
+
+function mqtt_row(i) {
+    return { x: GX, y: GY + i * 30, w: GW, h: 26 };
+}
+
+function mqtt_toggle_btn() {
+    return { x: GX, y: BACK_Y - 38, w: GW, h: 32 };
+}
+
+function draw_mqtt_page() {
+    lcd_clear(C.bg);
+    draw_header("MQTT");
+    let c = mqtt_cfg();
+    for (let i = 0; i < length(MQTT_FIELDS); i++) {
+        let r = mqtt_row(i), f = MQTT_FIELDS[i];
+        let v = f.key == "host" ? c.host : (f.key == "port" ? c.port :
+                (f.key == "user" ? c.user : c.pass));
+        let shown = f.key == "pass" && v != ""
+            ? substr("************", 0, length(v) > 12 ? 12 : length(v))
+            : v;
+        lcd_rect(r.x, r.y, r.w, r.h, C.widget);
+        lcd_rect(r.x, r.y, 3, r.h, v != "" ? C.cyan : C.dim);
+        lcd_text(r.x + 12, r.y + 10, tr(f.label), C.gray, C.widget, 1);
+        lcd_text(r.x + 96, r.y + 6, shown != "" ? tcut(shown, 20) : tr(f.hint),
+                 shown != "" ? C.white : C.dim, C.widget, shown != "" ? 2 : 1);
+    }
+    let b = mqtt_toggle_btn();
+    let can = c.host != "";
+    lcd_rect(b.x, b.y, b.w, b.h, C.widget);
+    lcd_rect(b.x, b.y, 3, b.h, c.on ? C.green : (can ? C.gray : C.dim));
+    let lab = c.on ? tr("publishing on") : (can ? tr("publishing off") : tr("set broker address first"));
+    lcd_text(b.x + int((b.w - tlen(lab) * 6) / 2), b.y + 12, lab,
+             c.on ? C.green : (can ? C.white : C.dim), C.widget, 1);
+    draw_back();
+    lcd_flush();
+}
+
+let ZIG_FW_DIR = "/usr/share/almond3s/zigbee";
+let ZIG_FLASH_LOG = "/tmp/lcd_zig_flash.log";
+
+function zig_fw_file() {
+    let d = fs.lsdir(ZIG_FW_DIR);
+    if (type(d) != "array") return null;
+    for (let i = 0; i < length(d); i++)
+        if (match(d[i], /\.ebl$/)) return ZIG_FW_DIR + "/" + d[i];
+    return null;
+}
+
+let ZIG_JOIN = "/tmp/lcd_zig_join.json";
+
+function zig_join_msg() {
+    let j = zig_json(ZIG_JOIN);
+    if (j == null) return null;
+    let st2 = int(+(j.stack ?? -1));
+    if (st2 == 144) return tr("joined the network");
+    if (st2 == 171) return sprintf("%s: %s", tr("join failed"), tr("network not found"));
+    if (st2 == 173) return sprintf("%s: %s", tr("join failed"), tr("key not received"));
+    if (st2 == 148) return sprintf("%s: %s", tr("join failed"), tr("rejected"));
+    if (st2 >= 0) return sprintf("%s (%d)", tr("join failed"), st2);
+    return null;
+}
+
+function zig_flash_progress() {
+    let raw = fs.readfile(ZIG_FLASH_LOG);
+    if (!raw) return null;
+    if (match(raw, /Serial upload complete/)) return { done: true, pct: 100 };
+    let all = match(raw, /блоков отправлено ([0-9]+) из ([0-9]+)/g);
+    if (type(all) == "array" && length(all) > 0) {
+        let m = all[length(all) - 1];
+        return { done: false, pct: int(+m[1] * 100 / +m[2]) };
+    }
+    if (match(raw, /загрузчик на связи/)) return { done: false, pct: 0 };
+    return { done: false, pct: -1 };
 }
 
 function draw_zigset_page() {
@@ -5940,13 +6336,15 @@ function draw_zigset_page() {
         [ tr("TX power"), sprintf("%d dBm", c.power) ],
     ];
     let bb = zigset_row(3);
+    let mesh = zig_mode() == "mesh";
     lcd_rect(bb.x, bb.y, bb.w, bb.h, C.widget);
     lcd_rect(bb.x, bb.y, 3, bb.h, c.beacon ? C.green : C.dim);
-    lcd_text(bb.x + 12, bb.y + 9, tr("Beacon"), C.gray, C.widget, 1);
-    lcd_text(bb.x + 100, bb.y + 6, c.beacon ? tr("on") : tr("off"),
-             c.beacon ? C.green : C.gray, C.widget, 2);
-    lcd_text(bb.x + bb.w - 11 - tlen(tr("every 10 sec")) * 6, bb.y + 9,
-             tr("every 10 sec"), C.dim, C.widget, 1);
+    lcd_text(bb.x + 12, bb.y + 9, tr("Telemetry"), C.gray, C.widget, 1);
+    lcd_text(bb.x + 100, bb.y + 6, c.beacon ? (mesh ? tr("network") : tr("beacon")) : tr("off"),
+             c.beacon ? (mesh ? C.cyan : C.green) : C.gray, C.widget, 2);
+    let hint2 = c.beacon ? (mesh ? tr("via Zigbee network") : tr("standalone, no network"))
+                         : tr("chip free for other software");
+    lcd_text(bb.x + bb.w - 11 - tlen(hint2) * 6, bb.y + 9, hint2, C.dim, C.widget, 1);
     for (let i = 0; i < length(rows); i++) {
         let r = zigset_row(i);
         lcd_rect(r.x, r.y, r.w, r.h, C.widget);
@@ -5974,19 +6372,61 @@ function draw_zigset_page() {
     let stt = zig_json("/tmp/lcd_zig_state.json");
     if (st.zig?.form_msg && stt != null && (time() - (st.zig.msg_ts ?? 0)) > 3)
         st.zig.form_msg = null;
-    let hint = st.zig?.form_msg ?? (stt?.state == 2
-        ? sprintf("%s %04X, %s", tr("own network"), stt.pan,
-                  stt.node == 1 ? "координатор" : "узел")
+    let pnode = int(+(zig_json(ZIG_PEERS)?.node ?? 0));
+    let hint = st.zig?.form_msg ?? (stt?.state == 2 || pnode > 0
+        ? sprintf("%s %04X, %s", tr("own network"), stt?.pan ?? c.pan,
+                  (pnode > 0 ? pnode : int(+(stt?.node ?? 0))) == 1
+                      ? tr("coordinator") : tr("router role"))
         : sprintf("%s: %s", tr("own network"), tr("off")));
-    lcd_text(GX + 12, GY + 5 * 27 + 4, hint, C.dim, C.bg, 1);
+    let jm = zig_join_msg();
+    if (jm != null && !st.zig?.flashing) hint = jm;
+    if (st.zig?.flashing) {
+        let pr = zig_flash_progress();
+        hint = pr == null ? tr("Updating chip...")
+             : (pr.done ? tr("Chip updated")
+                        : (pr.pct >= 0 ? sprintf("%s %d%%", tr("Updating chip..."), pr.pct)
+                                       : tr("Updating chip...")));
+    } else if (st.zig?.flash_done && (time() - st.zig.flash_done) < 20) {
+        hint = tr("Chip updated");
+    }
+    lcd_text(GX + 12, GY + 5 * 27 + 1, hint, C.dim, C.bg, 1);
+    let pj = zig_json(ZIG_PEERS);
+    let vs = null, vnum = 0;
+    let cm = pj?.chip ? match(pj.chip, /EZSP v([0-9]+) ([0-9.]+)/) : null;
+    if (cm) { vnum = int(+cm[1]); vs = sprintf("EZSP v%s  %s", cm[1], cm[2]); }
+    else {
+        let inf = zig_json(ZIG_INFO);
+        if (inf?.ezsp != null) {
+            vnum = int(+inf.ezsp);
+            vs = sprintf("EZSP v%d  %s", vnum, inf.stack ?? "");
+        }
+    }
+    if (vs != null)
+        lcd_text(GX + GW - 11 - tlen(vs) * 6, GY + 5 * 27 + 1, vs,
+                 vnum >= 8 ? C.green : C.orange, C.bg, 1);
 
-    let names = [ tr("Form network"), tr("Leave network") ];
-    for (let i = 0; i < 2; i++) {
+    let joined = stt?.state == 2;
+    let mq = mqtt_cfg();
+    let iscoord = joined && int(+(stt?.node ?? 0)) == 1;
+    let popen = st.zig?.permit_until != null && (st.zig.permit_until - time()) > 0;
+    let names = [ iscoord ? (popen ? sprintf("%d %s", st.zig.permit_until - time(), tr("sec"))
+                                   : tr("Permit short"))
+                          : tr("Form short"),
+                  joined ? tr("Leave short") : tr("Join short"),
+                  tr("Flash short"), mq.on ? "MQTT+" : "MQTT" ];
+    let accents = [ popen ? C.orange : C.green, joined ? C.red : A_PURPLE, C.cyan,
+                    mq.on ? C.green : (mq.host != "" ? C.gray : C.dim) ];
+    let fw = zig_fw_file();
+    for (let i = 0; i < 4; i++) {
         let b = zigset_act(i);
+        let dim = (i == 2 && fw == null) || (i == 3 && mq.host == "");
         lcd_rect(b.x, b.y, b.w, b.h, C.widget);
-        lcd_rect(b.x, b.y, 3, b.h, i == 0 ? C.green : C.red);
-        lcd_text(b.x + int((b.w - tlen(names[i]) * 6) / 2), b.y + 12, names[i],
-                 C.white, C.widget, 1);
+        lcd_rect(b.x, b.y, 3, b.h, dim ? C.dim : accents[i]);
+        let inner = b.w - 12;
+        let lab = tcut(names[i], int(inner / 6));
+        let lw = tlen(lab) * 6;
+        lcd_text(b.x + 7 + (lw < inner ? int((inner - lw) / 2) : 0), b.y + 12, lab,
+                 dim ? C.dim : C.white, C.widget, 1);
     }
     draw_back();
     lcd_flush();
@@ -6633,7 +7073,8 @@ function draw_cell_page() {
         let rc = GX + GCOL + GG;
         gcard(cx, y, GCOL, 140, C.cyan);
         lcd_text(cx + 10, y + 6, tr("IDENTITY"), C.gray, C.widget, 1);
-        kv2(cx + 10, y + 22,  "PLMN", sprintf("%d-%02d", int(+(l.mcc ?? 0)), int(+(l.mnc ?? 0))));
+        kv2(cx + 10, y + 22,  "PLMN", sprintf("%d-%s", int(+(l.mcc ?? 0)),
+        (l.mnc ?? "") != "" ? sprintf("%s", l.mnc) : "--"));
         kv2(cx + 10, y + 36,  "LAC",  c.lac);
         kv2(cx + 10, y + 50,  "TAC",  c.tac);
         kv2(cx + 10, y + 64,  "CID",  sprintf("%d", int(+(l.cid ?? 0))));
@@ -6698,10 +7139,7 @@ function draw_cell_page() {
                 let rqx = cx + cw - 10 - tlen(f[2]) * 6;
                 let bx = cx + 76, bw = rqx - 8 - bx;
                 if (bw < 40) bw = 40;
-                lcd_rect(bx, yy + 1, bw, 6, C.dim);
-                let fill = bar_ease("ant" + f[0],
-                                    int(bw * clampi(MET.rsrp.bar(rsrp), 0, 100) / 100));
-                if (fill > 0) lcd_rect(bx, yy + 1, fill, 6, col);
+                seg_bar(bx, yy + 1, bw, 6, MET.rsrp.bar(rsrp), col, C.btn, "ant" + f[0]);
                 lcd_text(rqx, yy, f[2], C.gray, C.widget, 1);
                 i++;
             }
@@ -6727,9 +7165,7 @@ function draw_cell_page() {
             lcd_text(cx + 40, yy, sprintf("%d", int(+(e?.pci ?? 0))), C.gray, C.widget, 1);
             lcd_text(cx + 74, yy, sprintf("%d", rsrp), col, C.widget, 1);
             let bx = cx + 110, bw = cw - 120;
-            lcd_rect(bx, yy + 1, bw, 6, C.dim);
-            let fill = bar_ease(bkey, int(bw * clampi(MET.rsrp.bar(rsrp), 0, 100) / 100));
-            if (fill > 0) lcd_rect(bx, yy + 1, fill, 6, col);
+            seg_bar(bx, yy + 1, bw, 6, MET.rsrp.bar(rsrp), col, C.btn, bkey);
         };
 
         lcd_text(cx + 10, y + 6, tr("OWN CELL"), C.gray, C.widget, 1);
@@ -7438,9 +7874,7 @@ function draw_metric_row(x, y, w, key, label, v) {
     let bx = x + 86, bw = w - 86;
     lcd_text(x, y, label, C.gray, C.widget, 1);
     lcd_text(x + 42, y, sprintf("%d", v), col, C.widget, 1);
-    lcd_rect(bx, y + 1, bw, 6, C.dim);
-    let fill = bar_ease(key, int(bw * clampi(m.bar(v), 0, 100) / 100));
-    if (fill > 0) lcd_rect(bx, y + 1, fill, 6, col);
+    seg_bar(bx, y + 1, bw, 6, m.bar(v), col, C.btn, key);
 }
 
 function draw_lte_page() {
@@ -7449,6 +7883,8 @@ function draw_lte_page() {
     let u = d?.uqmi;
     lcd_clear(C.bg);
     draw_header(tr("Modem"));
+
+
 
     let ox = st.ox, oy = st.oy;
     let X = GX + ox;
@@ -7461,58 +7897,50 @@ function draw_lte_page() {
     let REDGE = X + GW - 12;
     let rx = function(t) { return REDGE - tlen(t) * 6; };
 
-    // Три карточки одной высоты (54) с шагом сетки, чтобы строки совпадали:
-    // Модем - Сигнал - Сота. У каждой по четыре строки.
+    let hw = int((GW - 6) / 2);
+    let RX2 = X + hw + 6;
+    let row2 = function(cx0, yy, label, val, lcol, vcol) {
+        if (label != null && label != "")
+            lcd_text(cx0 + 13, yy, label, lcol ?? C.gray, C.widget, 1);
+        if (val != null && val != "") {
+            let vx = cx0 + hw - 12 - tlen(val) * 6;
+            lcd_text(vx, yy, val, vcol ?? C.white, C.widget, 1);
+        }
+    };
+
     let ay = GY + oy;
-    gcard(X, ay, GW, 54, C.green);
+    gcard(X, ay, hw, 54, C.green);
     let model = l.modem ?? "-";
     if (tlen(model) > 15) {
         let w = split(model, " ");
         if (length(w) > 1) model = join(" ", slice(w, 1));
     }
-    lcd_text(LX, ay + 6, tr("Modem"), C.gray, C.widget, 1);
-    lcd_text(VX, ay + 6, tcut(model, 15), C.white, C.widget, 1);
-    let mode_s = rat_label(l.mode ?? "-");
-    if (nca > 1) mode_s += sprintf(" %dCA", nca);
-    lcd_text(rx(mode_s), ay + 6, mode_s, C.cyan, C.widget, 1);
-
-    lcd_text(LX, ay + 18, tr("Band"), C.gray, C.widget, 1);
-    let band = l.band ?? "";
-    if (band != "" && band != "-")
-        lcd_text(VX, ay + 18, tcut(band, 12), C.accent, C.widget, 1);
-
-    // Справа во второй строке: слот и температура одним блоком «SIM1 | 43°C»,
-    // цвета разные - считаем ширину пары, рисуем двумя кусками.
     let slot = int(+(l.simslot ?? 0));
-    let sim_part = slot > 0 ? sprintf("SIM%d | ", slot) : "";
     let ts = temp > 0
         ? sprintf("%d°C%s", temp, int(+(l.therm ?? 0)) > 0 ? " !" : "")
         : "-";
     let tc = temp >= 70 ? C.red : (temp >= 55 ? C.orange : (temp > 0 ? C.white : C.dim));
-    let combo_x = REDGE - (tlen(sim_part) + tlen(ts)) * 6;
-    if (sim_part != "")
-        lcd_text(combo_x, ay + 18, sim_part, C.gray, C.widget, 1);
-    lcd_text(combo_x + tlen(sim_part) * 6, ay + 18, ts, tc, C.widget, 1);
+    let band = l.band ?? "";
+    row2(X, ay + 6, tr("Modem"), tcut(model, 13), null, C.white);
+    row2(X, ay + 18, tr("Band"),
+         band != "" && band != "-" ? tcut(band, 8) : "-", null, C.accent);
+    row2(X, ay + 30, "SIM", slot > 0 ? sprintf("%d", slot) : "-", null, C.white);
+    row2(X, ay + 42, tr("Temp"), ts, null, tc);
 
-    let phone = phone_fmt(l.phone);
-    let oper = l.operator ?? "";
-    if (oper != "" && oper != "-")
-        lcd_text(LX, ay + 30, tcut(oper, 16), C.white, C.widget, 1);
-    if (phone != "")
-        lcd_text(rx(phone), ay + 30, phone, C.white, C.widget, 1);
-
-    // Четвёртая строка: слева подпись (при роуминге - ROAM), само качество
-    // сигнала CSQ - в правый угол.
+    gcard(RX2, ay, hw, 54, A_PINK);
+    let mode_s = rat_label(l.mode ?? "-");
+    if (nca > 1) mode_s += sprintf(" %dCA", nca);
     let roam_on = int(+(l.roaming ?? 0)) > 0;
-    lcd_text(LX, ay + 42, roam_on ? tr("ROAM") : tr("Signal qual"),
-             roam_on ? C.orange : C.gray, C.widget, 1);
-    if (csq > 0) {
-        let cs = sprintf("CSQ %d/31", csq);
-        lcd_text(rx(cs), ay + 42, cs, C.gray, C.widget, 1);
-    }
+    let oper = l.operator ?? "";
+    let phone = phone_fmt(l.phone);
+    row2(RX2, ay + 6, tr("Operator"),
+         mode_s != "" && mode_s != "-" ? mode_s : "-", null, C.cyan);
+    row2(RX2, ay + 18, tcut(oper != "" && oper != "-" ? oper : "-", 14), null, C.white);
+    row2(RX2, ay + 30, phone != "" ? phone : "-", null, C.white);
+    row2(RX2, ay + 42, roam_on ? tr("ROAM") : tr("Quality"),
+         csq > 0 ? sprintf("%d/31", csq) : "-",
+         roam_on ? C.orange : C.gray, C.gray);
 
-    // Карточка 2: сигнал - четыре метрики теми же шкалами, что на дашборде.
-    // Заголовка и CSQ тут больше нет - они переехали строкой выше.
     let by = ay + 62;
     gcard(X, by, GW, 54, C.cyan);
     draw_metric_row(X + 10, by + 6,  GW - 20, "rsrp", "RSRP", rsrp);
@@ -7520,35 +7948,32 @@ function draw_lte_page() {
     draw_metric_row(X + 10, by + 30, GW - 20, "sinr", "SINR", int(+(l.sinr ?? 0)));
     draw_metric_row(X + 10, by + 42, GW - 20, "rssi", "RSSI", int(+(l.rssi ?? 0)));
 
-    // Карточка 3: сота и подключение - заголовок плюс три строки.
     let cy = by + 62;
-    gcard(X, cy, GW, 54, "#D2A8FF");
-    lcd_text(LX, cy + 6, tr("CELL / NETWORK"), C.gray, C.widget, 1);
-    // Ноль тут - это «модем не сказал», а не «нулевая сота»: SIM7100E, например,
-    // PCI и EARFCN не отдаёт вовсе. Показываем прочерк, иначе выглядит как
-    // настоящее значение.
-    let cell_id = function(label, v) {
+    let cell_id = function(v) {
         let n = int(+(v ?? 0));
-        return sprintf("%s %s", label, n > 0 ? sprintf("%d", n) : "-");
+        return n > 0 ? sprintf("%d", n) : "-";
     };
-    let enb_s = cell_id("eNB", u?.enb_id);
-    lcd_text(LX, cy + 18, cell_id("PCI", u?.pci), C.white, C.widget, 1);
-    lcd_text(rx(enb_s), cy + 18, enb_s, C.white, C.widget, 1);
-    lcd_text(LX, cy + 30, cell_id("EARFCN", l.earfcn), C.white, C.widget, 1);
+    gcard(X, cy, hw, 54, "#D2A8FF");
+    row2(X, cy + 6, tr("Cell"), null);
+    row2(X, cy + 18, "PCI", cell_id(u?.pci));
+    row2(X, cy + 30, "EARFCN", cell_id(l.earfcn));
+    row2(X, cy + 42, "eNB", cell_id(u?.enb_id));
 
+    gcard(RX2, cy, hw, 54, A_TEAL);
     let mcc = int(+(u?.mcc ?? 0)), mnc = int(+(u?.mnc ?? 0));
+    let plmn_s = "-";
     if (mcc > 0) {
+        plmn_s = sprintf("%d-%02d", mcc, mnc);
         let pop = lc(trim(l.operator ?? ""));
         let plmn_name = get_plmn_name(mcc, mnc);
-        let plmn_s = sprintf("%d-%02d", mcc, mnc);
-        if (plmn_name && lc(plmn_name) != pop)
-            plmn_s += " " + plmn_name;
-        lcd_text(rx(plmn_s), cy + 30, plmn_s, C.gray, C.widget, 1);
+        if (plmn_name && lc(plmn_name) != pop) plmn_s += " " + tcut(plmn_name, 8);
     }
-
-    let conn_s = conn_fmt(l.conn_time);
-    lcd_text(LX, cy + 42, l.ip ?? "-", C.green, C.widget, 1);
-    lcd_text(rx(conn_s), cy + 42, conn_s, C.gray, C.widget, 1);
+    let ip_s = l.ip ?? "";
+    let conn_s = conn_fmt(l.conn_time) ?? "";
+    row2(RX2, cy + 6, tr("Network"), null);
+    row2(RX2, cy + 18, "PLMN", plmn_s, null, C.gray);
+    row2(RX2, cy + 30, null, ip_s != "" ? ip_s : "-", null, C.green);
+    row2(RX2, cy + 42, tr("Online"), conn_s != "" ? conn_s : "-", null, C.gray);
 
     draw_back();
     lcd_flush();
@@ -7658,7 +8083,12 @@ function page_sig() {
     }
     if (st.page == "zigset") {
         let f = fs.stat("/tmp/lcd_zig_state.json");
-        return base + sprintf("|%d|%d", f ? f.mtime : 0, st.zig?.form_msg ? 1 : 0);
+        let fl = fs.stat(ZIG_FLASH_LOG);
+        let pf = fs.stat(ZIG_PEERS);
+        let jf = fs.stat(ZIG_JOIN);
+        return base + sprintf("|%d|%d|%d|%d|%d|%d", f ? f.mtime : 0, st.zig?.form_msg ? 1 : 0,
+                              fl ? fl.size : 0, st.zig?.flashing ? 1 : 0, pf ? pf.mtime : 0,
+                              jf ? jf.mtime : 0);
     }
     if (st.page == "zigbee") {
         let e = fs.stat(ZIG_ESCAN), pf = fs.stat(ZIG_PEERS);
@@ -7800,6 +8230,7 @@ function draw_current() {
     case "iconedit":  draw_iconedit_page(); break;
     case "zigbee":    draw_zigbee_page(); break;
     case "zigset":    draw_zigset_page(); break;
+    case "mqtt":      draw_mqtt_page(); break;
     case "zigpeer":   draw_zigpeer_page(); break;
     case "games":     draw_games_page(); break;
     case "gset":      draw_gset_page(); break;
@@ -7822,7 +8253,7 @@ function draw_current() {
 
 let DASH_PING_HOST = "77.88.8.8";
 let DASH_CW = 72, DASH_CH = 50, DASH_G = 6, DASH_MX = 7, DASH_MY = 7;
-let DASH_PAGE_SECS = 10;
+let DASH_PAGE_SECS = 16;
 
 let DASH_PAGES = [
     { title: "Overview", tiles: [
@@ -7895,8 +8326,36 @@ function dash_date() {
     return sprintf("%d %s", t.mday, M[clampi(t.mon, 1, 12) - 1]);
 }
 
+// Номер текущей страницы держим явно, а не выводим из часов: выбор страницы
+// пальцем должен переводить ровно на неё и начинать её показ с полного
+// интервала, а дальше цикл продолжается уже от неё.
 function dash_page() {
-    return int(time() / DASH_PAGE_SECS) % length(DASH_PAGES);
+    let n = length(DASH_PAGES);
+    if (st.dash_t0 == null) { st.dash_t0 = time(); st.dash_cur = 0; }
+    let steps = int((time() - st.dash_t0) / DASH_PAGE_SECS);
+    if (steps > 0) {
+        st.dash_cur = ((st.dash_cur ?? 0) + steps) % n;
+        st.dash_t0 += steps * DASH_PAGE_SECS;
+    }
+    return st.dash_cur ?? 0;
+}
+
+function dash_goto(i) {
+    st.dash_cur = i % length(DASH_PAGES);
+    st.dash_t0 = time();
+}
+
+// Пасхалка: точки-страницы внизу заставки выбирают страницу, а не будят экран.
+// Возвращает номер точки под пальцем или -1.
+function dash_dot_at(tx, ty) {
+    let ox = st.ox ?? 0, oy = st.oy ?? 0;
+    let n = length(DASH_PAGES);
+    if (ty < 218 + oy || ty > 240 + oy) return -1;
+    for (let i = 0; i < n; i++) {
+        let dx = LCD_W - 10 - (n - i) * 12 + ox;
+        if (tx >= dx - 2 && tx <= dx + 9) return i;
+    }
+    return -1;
 }
 
 
@@ -7907,62 +8366,6 @@ function dash_box(t) {
         w: t.cw * DASH_CW + (t.cw - 1) * DASH_G,
         h: t.ch * DASH_CH + (t.ch - 1) * DASH_G,
     };
-}
-
-let A_CYAN = "#58A6FF", A_GREEN = "#3FB950", A_ORANGE = "#E8853A",
-    A_PURPLE = "#A371F7", A_TEAL = "#39C5CF", A_PINK = "#DB61A2";
-
-function dash_card(b, o, acc) {
-    lcd_rect(b.x, b.y, b.w, b.h, o.card);
-    lcd_rect(b.x, b.y, 3, b.h, o.mono ?? (acc ?? C.dim));
-}
-
-function dash_lab(b, o, s) {
-    lcd_text(b.x + 12, b.y + 6, s, o.dim, o.card, 1);
-}
-
-function dash_right(b, o, y, s, col) {
-    lcd_text(b.x + b.w - 11 - tlen(s) * 6, y, s, o.mono ?? (col ?? o.dim), o.card, 1);
-}
-
-function dash_val(b, o, s, col) {
-    let sz = (tlen(s) * 12 <= b.w - 24) ? 2 : 1;
-    lcd_text(b.x + 12, b.y + (sz == 2 ? 19 : 22), s, o.mono ?? (col ?? o.fg), o.card, sz);
-}
-
-function dash_sub(b, o, s) {
-    lcd_text(b.x + 12, b.y + b.h - 13, s, o.dim, o.card, 1);
-}
-
-function dash_bar(b, o, pct, col) {
-    let bw = b.w - 24, fw = int(bw * clampi(pct, 0, 100) / 100);
-    lcd_rect(b.x + 12, b.y + b.h - 12, bw, 5, o.mono ? "#0A2A16" : C.btn);
-    if (fw > 0) lcd_rect(b.x + 12, b.y + b.h - 12, fw, 5, o.mono ?? col);
-}
-
-function dash_simple(b, o, acc, label, val, sub, col) {
-    dash_card(b, o, acc);
-    dash_lab(b, o, label);
-    dash_val(b, o, val, col);
-    if (sub != null && sub != "") dash_sub(b, o, sub);
-}
-
-function dash_gauge(b, o, acc, label, val, pct, col) {
-    dash_card(b, o, acc);
-    dash_lab(b, o, label);
-    dash_val(b, o, val, col);
-    dash_bar(b, o, pct, col);
-}
-
-function dash_sig_pct(d) {
-    let sp = int(+(d?.lte?.signal ?? 0));
-    if (sp > 0) return clampi(sp, 0, 100);
-    let rsrp = int(+(d?.lte?.rsrp ?? d?.uqmi?.rsrp ?? 0));
-    return rsrp != 0 ? clampi(int(MET.rsrp.bar(rsrp)), 0, 100) : -1;
-}
-
-function dash_lvl_col(pct) {
-    return pct < 0 ? C.dim : (pct >= 60 ? C.green : (pct >= 30 ? C.orange : C.red));
 }
 
 function dash_tile(t, d, o) {
@@ -7987,7 +8390,8 @@ function dash_tile(t, d, o) {
 
     if (t.k == "wifi") {
         let nc = type(d?.wifi?.clients) == "array" ? length(d.wifi.clients) : 0;
-        dash_simple(b, o, A_TEAL, "Wi-Fi", sprintf("%d", nc), tr("clients"), nc > 0 ? A_TEAL : o.dim);
+        let wcol = nc > 0 ? A_TEAL : C.dim;
+        dash_simple(b, o, wcol, "Wi-Fi", sprintf("%d", nc), tr("clients"), wcol);
         return;
     }
 
@@ -8037,7 +8441,7 @@ function dash_tile(t, d, o) {
     if (t.k == "ping") {
         let ms = int(+(d?.ping?.google_ms ?? -1));
         let col = ms < 0 ? C.dim : (ms < 80 ? C.green : (ms < 250 ? C.orange : C.red));
-        dash_simple(b, o, A_TEAL, tr("Ping"), ms >= 0 ? sprintf("%d", ms) : "--", DASH_PING_HOST, col);
+        dash_simple(b, o, col, tr("Ping"), ms >= 0 ? sprintf("%d", ms) : "--", DASH_PING_HOST, col);
         return;
     }
 
@@ -8055,34 +8459,36 @@ function dash_tile(t, d, o) {
 
     if (t.k == "rsrp") {
         let v = int(+(d?.lte?.rsrp ?? 0));
-        dash_simple(b, o, A_GREEN, "RSRP", v != 0 ? sprintf("%d", v) : "--", "dBm",
-                    dash_lvl_col(v != 0 ? clampi(int(MET.rsrp.bar(v)), 0, 100) : -1));
+        let rcol = dash_lvl_col(v != 0 ? clampi(int(MET.rsrp.bar(v)), 0, 100) : -1);
+        dash_simple(b, o, rcol, "RSRP", v != 0 ? sprintf("%d", v) : "--", "dBm", rcol);
         return;
     }
 
     if (t.k == "rsrq") {
         let v = int(+(d?.lte?.rsrq ?? 0));
-        dash_simple(b, o, A_PURPLE, "RSRQ", v != 0 ? sprintf("%d", v) : "--", "dB", o.fg);
+        let qcol = v == 0 ? C.dim : (v >= -10 ? C.green : (v >= -15 ? C.orange : C.red));
+        dash_simple(b, o, qcol, "RSRQ", v != 0 ? sprintf("%d", v) : "--", "dB", qcol);
         return;
     }
 
     if (t.k == "sinr") {
         let v = int(+(d?.lte?.sinr ?? 0));
-        dash_simple(b, o, A_TEAL, "SINR", sprintf("%d", v), "dB",
-                    v >= 10 ? C.green : (v >= 0 ? C.orange : C.red));
+        let scol = v >= 10 ? C.green : (v >= 0 ? C.orange : C.red);
+        dash_simple(b, o, scol, "SINR", sprintf("%d", v), "dB", scol);
         return;
     }
 
     if (t.k == "csq") {
         let v = int(+(d?.lte?.csq ?? 0));
-        dash_simple(b, o, A_PINK, "CSQ", sprintf("%d", v), "0-31", o.fg);
+        let qq = v == 0 ? C.dim : (v >= 20 ? C.green : (v >= 10 ? C.orange : C.red));
+        dash_simple(b, o, qq, "CSQ", sprintf("%d", v), "0-31", qq);
         return;
     }
 
     if (t.k == "mtemp") {
         let v = int(+(d?.lte?.temp ?? 0));
-        dash_simple(b, o, A_ORANGE, tr("Temp"), v != 0 ? sprintf("%d°C", v) : "--", tr("Modem"),
-                    v >= 70 ? C.orange : o.fg);
+        let tc = v == 0 ? C.dim : (v >= 70 ? C.red : A_ORANGE);
+        dash_simple(b, o, tc, tr("Temp"), v != 0 ? sprintf("%d°C", v) : "--", tr("Modem"), tc);
         return;
     }
 
@@ -8130,22 +8536,21 @@ function dash_tile(t, d, o) {
         let cores = type(d?.cpu_core_busy) == "array" ? d.cpu_core_busy : [];
         let n = length(cores);
         if (n < 1 || b.w < 120) {
-            dash_gauge(b, o, A_CYAN, "CPU", busy >= 0 ? sprintf("%d%%", busy) : "--",
+            dash_gauge(b, o, col, "CPU", busy >= 0 ? sprintf("%d%%", busy) : "--",
                        busy, col);
             return;
         }
-        dash_card(b, o, A_CYAN);
+        dash_card(b, o, col);
         dash_lab(b, o, "CPU");
         dash_val(b, o, busy >= 0 ? sprintf("%d%%", busy) : "--", col);
-        let bwid = 8, gap = 4, gh = 26;
-        let x0 = b.x + b.w - 12 - n * bwid - (n - 1) * gap, y0 = b.y + 11;
+        let bwid = 8, gap = 4, gh = 31;
+        let x0 = b.x + b.w - 12 - n * bwid - (n - 1) * gap, y0 = b.y + 6;
         for (let i = 0; i < n; i++) {
             let v = clampi(int(+(cores[i] ?? 0)), 0, 100);
-            let fh = int(gh * v / 100), bx = x0 + i * (bwid + gap);
-            lcd_rect(bx, y0, bwid, gh, o.mono ? "#0A2A16" : C.btn);
-            if (fh > 0)
-                lcd_rect(bx, y0 + gh - fh, bwid, fh,
-                         o.mono ?? (v >= 85 ? A_ORANGE : A_CYAN));
+            let bx = x0 + i * (bwid + gap);
+            seg_vbar(bx, y0, bwid, gh, v,
+                     o.mono ?? (v >= 85 ? A_ORANGE : A_CYAN),
+                     o.mono ? "#0A2A16" : C.btn, sprintf("cpu%d", i), 3);
             lcd_text(bx + 1, y0 + gh + 4, sprintf("%d", i), o.dim, o.card, 1);
         }
         return;
@@ -8154,16 +8559,16 @@ function dash_tile(t, d, o) {
     if (t.k == "mem") {
         let tot = int(+(d?.mem_total_mb ?? 0)), fr = int(+(d?.mem_free_mb ?? 0));
         let used = tot > 0 ? int((tot - fr) * 100 / tot) : -1;
-        dash_gauge(b, o, A_GREEN, tr("Memory"), used >= 0 ? sprintf("%d%%", used) : "--", used,
-                   used >= 85 ? C.orange : C.cyan);
+        let mcol = used >= 85 ? C.orange : C.cyan;
+        dash_gauge(b, o, mcol, tr("Memory"), used >= 0 ? sprintf("%d%%", used) : "--", used, mcol);
         return;
     }
 
     if (t.k == "disk") {
         let tot = int(+(d?.storage?.total_kb ?? 0)), fr = int(+(d?.storage?.free_kb ?? 0));
         let used = tot > 0 ? int((tot - fr) * 100 / tot) : -1;
-        dash_gauge(b, o, A_TEAL, tr("Disk"), used >= 0 ? sprintf("%d%%", used) : "--", used,
-                   used >= 85 ? C.orange : C.cyan);
+        let dcol = used >= 85 ? C.orange : C.cyan;
+        dash_gauge(b, o, dcol, tr("Disk"), used >= 0 ? sprintf("%d%%", used) : "--", used, dcol);
         return;
     }
 
@@ -8175,8 +8580,8 @@ function dash_tile(t, d, o) {
     if (t.k == "load") {
         let la = +(d?.cpu_load ?? 0);
         let nc = int(+(d?.cpu_cores ?? 1)); if (nc < 1) nc = 1;
-        dash_simple(b, o, A_PURPLE, tr("Load"), sprintf("%.2f", la), tr("1 min"),
-                    la > nc ? C.orange : o.fg);
+        dash_simple(b, o, la > nc ? C.orange : A_PURPLE, tr("Load"), sprintf("%.2f", la),
+                    tr("1 min"), la > nc ? C.orange : o.fg);
         return;
     }
 
@@ -8492,6 +8897,9 @@ function night_dim(lvl) {
     return int(255 * night_cfg().bright / 100);
 }
 
+let BL_TOUCH_MIN = 26;
+let BL_BOOST_SEC = 15;
+
 function backlight_write(on) {
     // Яркость крутим ШИМом по подсветке - это настоящая темнота, а не серая
     // картинка. Цифровое затемнение (gray) снято совсем: оно давало не
@@ -8502,6 +8910,9 @@ function backlight_write(on) {
     // строки, а в покое - ноль строк, и переливать нечего.
     let lvl = on ? night_dim(int(bright_cfg() * 255 / 100)) : 0;
     if (lvl > 255) lvl = 255;
+    if (on && lvl < BL_TOUCH_MIN && st.bl_boost
+        && (time() - st.bl_boost) < BL_BOOST_SEC)
+        lvl = BL_TOUCH_MIN;
     // Второй порог тоже снят - иначе он поднимал бы до 8 всё, что ночная
     // яркость честно опустила ниже. Ноль остаётся ровно одним случаем:
     // экран выключен.
@@ -8529,6 +8940,30 @@ function backlight_write(on) {
 // (st.night_was = null), затем пересчитываем яркость: night_dim сам решит,
 // ночная она или дневная, по тому, что сейчас на экране. Пока открыта сама
 // страница, экран активен - и он не темнеет, иначе настройку не было бы видно.
+function bl_level_now() {
+    let lvl = night_dim(int(bright_cfg() * 255 / 100));
+    if (lvl > 255) lvl = 255;
+    if (lvl < BL_TOUCH_MIN && st.bl_boost && (time() - st.bl_boost) < BL_BOOST_SEC)
+        lvl = BL_TOUCH_MIN;
+    return lvl;
+}
+
+function draw_saver_tick() {
+    draw_screensaver();
+}
+
+function bl_reassert() {
+    if (st.blank || st.halting) return;
+    system(sprintf("almond3s-lcd dim %d >/dev/null 2>&1", bl_level_now()));
+}
+
+function bl_boost() {
+    let was = st.bl_boost;
+    st.bl_boost = time();
+    if (!st.blank && (was == null || (time() - was) >= BL_BOOST_SEC))
+        backlight_write(true);
+}
+
 function night_refresh() {
     st.night_was = null;
     night_tick();
@@ -8832,13 +9267,25 @@ function handle_touch(tx, ty, tmove) {
     if (st.page == "zigbee" && ty < BACK_Y) {
         st.zig ??= { mode: "escan" };
         if (st.zig.mode == "peers") {
-            let d = zig_json(ZIG_PEERS);
-            let peers = type(d?.peers) == "array" ? d.peers : [];
+            let rows = zig_rows();
             let ay = GY + 32;
-            for (let i = 0; i < length(peers) && i < 5; i++) {
-                if (ty >= ay + 20 + i * 20 - 6 && ty < ay + 20 + i * 20 + 14) {
-                    st.zig.peer = i;
+            if (length(rows) > 0) {
+                let more = length(rows) > ZIG_ROWS;
+                let show = more ? ZIG_ROWS - 1 : length(rows);
+                let off = (st.zig.poff ?? 0) % length(rows);
+                for (let k = 0; k < show; k++) {
+                    let y = ay + 24 + k * 17;
+                    if (ty < y - 5 || ty >= y + 12) continue;
+                    let n = rows[(off + k) % length(rows)];
+                    if (n.pi < 0) return;
+                    st.zig.peer = n.pi;
                     go_page("zigpeer");
+                    return;
+                }
+                let fy = ay + 24 + show * 17;
+                if (more && ty >= fy - 5 && ty < fy + 12) {
+                    st.zig.poff = (off + show) % length(rows);
+                    draw_zigbee_page();
                     return;
                 }
             }
@@ -8886,24 +9333,99 @@ function handle_touch(tx, ty, tmove) {
         {
             let bb = zigset_row(3);
             if (in_rect(tx, ty, bb.x, bb.y, bb.w, bb.h)) {
-                let on = !c.beacon;
-                zig_set("beacon", on ? 1 : 0);
-                if (on) zig_beacon_start(); else zig_beacon_stop();
+                let mesh = zig_mode() == "mesh";
+                if (!c.beacon) {
+                    zig_set("beacon", 1);
+                    zig_set("mode", "beacon");
+                } else if (!mesh) {
+                    zig_set("mode", "mesh");
+                } else {
+                    zig_set("beacon", 0);
+                    zig_set("mode", "beacon");
+                }
+                zig_beacon_stop();
+                zig_beacon_start();
                 draw_zigset_page();
                 return;
             }
         }
-        for (let i = 0; i < 2; i++) {
+        for (let i = 0; i < 4; i++) {
             let b = zigset_act(i);
             if (!in_rect(tx, ty, b.x, b.y, b.w, b.h)) continue;
             st.zig ??= {};
-            if (i == 0)
+            if (i == 3) {
+                let mq = mqtt_cfg();
+                zig_btn_fx(b, mq.on ? "MQTT+" : "MQTT", mq.on ? C.green : C.gray);
+                go_page("mqtt");
+                return;
+            }
+            if (i == 2) {
+                zig_btn_fx(b, tr("Flash short"), C.cyan);
+                let fw = zig_fw_file();
+                if (fw == null) {
+                    toast(tr("no firmware in image"), C.orange, "#2A1A06", 2);
+                    return;
+                }
+                lcd_clear("#1A1000");
+                lcd_rect(20, 40, 280, 150, "#2A1A06");
+                lcd_rect(20, 40, 280, 2, C.orange);
+                lcd_text(34, 54, tr("Update Zigbee chip?"), C.orange, "#2A1A06", 2);
+                lcd_text(34, 80, tr("Takes about a minute."), C.gray, "#2A1A06", 1);
+                lcd_text(34, 94, tr("Factory version cannot be restored."), C.gray, "#2A1A06", 1);
+                lcd_text(34, 108, tr("Do not power off."), C.gray, "#2A1A06", 1);
+                lcd_rect(40, 135, 110, 40, C.orange);
+                lcd_text(72, 148, tr("YES"), C.white, C.orange, 2);
+                lcd_rect(170, 135, 110, 40, "#0841");
+                lcd_text(202, 148, tr("NO"), C.white, "#0841", 2);
+                lcd_flush();
+                let go = false;
+                for (let sec = 10; sec > 0; sec--) {
+                    system("sleep 1");
+                    let ct = read_touch();
+                    if (!ct) continue;
+                    if (ct.x < 160 && ct.y > 120) go = true;
+                    break;
+                }
+                if (!go) { draw_zigset_page(); return; }
+                zig_beacon_stop();
+                st.zig.flashing = time();
+                st.zig.flash_done = null;
+                fs.unlink(ZIG_FLASH_LOG);
+                fs.unlink(ZIG_PEERS);
+                fs.unlink(ZIG_INFO);
+                system(sprintf("(%s flash %s 1 > /tmp/lcd_zig_flash.json 2>%s; %s info > %s 2>/dev/null) </dev/null &",
+                               ZIG_BIN, fw, ZIG_FLASH_LOG, ZIG_BIN, ZIG_INFO));
+                draw_zigset_page();
+                return;
+            }
+            if (i == 0) {
+                let stt3 = zig_json("/tmp/lcd_zig_state.json");
+                if (stt3?.state == 2 && int(+(stt3?.node ?? 0)) == 1) {
+                    zig_btn_fx(b, tr("Permit short"), C.orange);
+                    st.zig.permit_until = time() + 240;
+                    system(sprintf("%s permit 240 >/dev/null 2>&1 &", ZIG_BIN));
+                    toast(tr("pairing window open"), C.orange, "#2A1A06", 2);
+                    draw_zigset_page();
+                    return;
+                }
+                zig_btn_fx(b, tr("Form short"), C.green);
                 system(sprintf("%s form %d %d %d %s >/dev/null 2>&1; %s state > /tmp/lcd_zig_state.json 2>/dev/null &",
                                ZIG_BIN, c.pan, c.ch, c.power, c.key, ZIG_BIN));
-            else
-                system(sprintf("%s leave >/dev/null 2>&1; %s state > /tmp/lcd_zig_state.json 2>/dev/null &",
-                               ZIG_BIN, ZIG_BIN));
-            st.zig.form_msg = tr("Scanning...");
+            }
+            else {
+                let stt2 = zig_json("/tmp/lcd_zig_state.json");
+                zig_btn_fx(b, stt2?.state == 2 ? tr("Leave short") : tr("Join short"),
+                           stt2?.state == 2 ? C.red : A_PURPLE);
+                if (stt2?.state == 2)
+                    system(sprintf("%s leave >/dev/null 2>&1; %s state > /tmp/lcd_zig_state.json 2>/dev/null &",
+                                   ZIG_BIN, ZIG_BIN));
+                else {
+                    fs.unlink(ZIG_JOIN);
+                    system(sprintf("(%s/zig_join.sh %s %d %d >/dev/null 2>&1) &",
+                                   SCRIPTS, c.key, c.pan, c.ch));
+                }
+            }
+            st.zig.form_msg = tr("looking for a network");
             st.zig.msg_ts = time();
             draw_zigset_page();
             return;
@@ -8985,6 +9507,54 @@ function handle_touch(tx, ty, tmove) {
     // правило «низ - это назад» съедало нажатия по стрелкам целиком.
     // Порог ровно по видимой полосе «Назад» (BACK_Y=208, бар 32px), без
     // прежних 10px запаса выше неё: этот запас (198..208) съедал нижние
+    if (st.page == "mqtt" && ty < BACK_Y) {
+        let c = mqtt_cfg();
+        for (let i = 0; i < length(MQTT_FIELDS); i++) {
+            let r = mqtt_row(i);
+            if (!in_rect(tx, ty, r.x, r.y, r.w, r.h)) continue;
+            let f = MQTT_FIELDS[i];
+            st.kbmode = "mqtt";
+            st.kbfield = f.key;
+            st.mqttbuf = f.key == "host" ? c.host : (f.key == "port" ? c.port :
+                         (f.key == "user" ? c.user : c.pass));
+            st.citykb = { pg: f.key == "port" ? "symA" : "abc", caps: false };
+            go_page("kbd");
+            return;
+        }
+        let b = mqtt_toggle_btn();
+        if (in_rect(tx, ty, b.x, b.y, b.w, b.h)) {
+            if (c.host == "") {
+                toast(tr("set broker address first"), C.orange, "#2A1A06", 2);
+                return;
+            }
+            mqtt_set("enabled", c.on ? "0" : "1");
+            system(c.on ? "/etc/init.d/almond3s-mqtt stop; /etc/init.d/almond3s-mqtt disable"
+                        : "/etc/init.d/almond3s-mqtt enable; /etc/init.d/almond3s-mqtt restart");
+            toast(c.on ? tr("MQTT off") : sprintf("%s %s", tr("MQTT on"), c.host),
+                  c.on ? C.gray : C.green, "#06202a", 2);
+            draw_mqtt_page();
+            return;
+        }
+        return;
+    }
+
+    if (st.page == "zigpeer" && ty >= BACK_Y) {
+        let d = zig_json(ZIG_PEERS);
+        let peers = type(d?.peers) == "array" ? d.peers : [];
+        let pr = peers[st.zig?.peer ?? 0];
+        let pname = pr?.name ?? "";
+        let cell = int(tx / int(LCD_W / 4));
+        if (cell >= 3 || pname == "") { back_press_fx(); go_back(); return; }
+        let von = int(+(pr?.m?.vpn ?? 0)) == 1;
+        let act = cell == 0 ? (von ? "vpn_off" : "vpn_on") : (cell == 1 ? "modem" : "reboot");
+        let lab = cell == 0 ? (von ? tr("VPN off") : tr("VPN on"))
+                            : (cell == 1 ? tr("Modem") : tr("Reboot"));
+        system(sprintf("echo %s %s > /tmp/.zig_cmd", sh_quote(pname), sh_quote(act)));
+        toast(tcut(pname, 12) + ": " + lab, C.white, "#06202a", 1);
+        draw_zigpeer_page();
+        return;
+    }
+
     // пиксели кнопок всех страниц со своим нижним рядом - стрелки листания
     // «Соты»/«Города», размер часов, ШИМ, ночная яркость, 6-я строка сетей.
     if (st.page != "menu" && st.page != "sms" && st.page != "sms1" &&
@@ -9437,7 +10007,11 @@ function handle_touch(tx, ty, tmove) {
         // Полоса «назад» внизу = отмена ввода, возврат к списку сетей. go_back()
         // СНИМАЕТ со стека (было go_page — оно КЛАДЁТ kbd обратно, отсюда петля
         // kbd<->stascan, из которой не выйти).
-        if (ty >= BACK_Y) { if (st.kbmode == "city") st.kbmode = "sta"; go_back(); return; }
+        if (ty >= BACK_Y) {
+            if (st.kbmode == "city" || st.kbmode == "mqtt") st.kbmode = "sta";
+            go_back();
+            return;
+        }
         let e = kb_key_at(tx, ty);
         if (!e) return;
         // Режим города: свой буфер/клавиатура, ↵ = применить город (геокод в фетче).
@@ -9451,6 +10025,25 @@ function handle_touch(tx, ty, tmove) {
                 let name = trim(st.citybuf ?? "");
                 st.kbmode = "sta";
                 if (name != "") geo_search(name); else go_back();
+                return;
+            }
+            draw_kbd_page();
+            return;
+        }
+        if (st.kbmode == "mqtt") {
+            kb_press_show(e, st.citykb, 92);
+            let a = kb_apply(e, st.citykb);
+            if (a.t == "char") st.mqttbuf = (st.mqttbuf ?? "") + a.ch;
+            else if (a.t == "del") st.mqttbuf = substr(st.mqttbuf ?? "", 0, length(st.mqttbuf ?? "") - 1);
+            else if (a.t == "space") st.mqttbuf = (st.mqttbuf ?? "") + " ";
+            else if (a.t == "enter") {
+                let val = trim(st.mqttbuf ?? "");
+                let fk = st.kbfield ?? "host";
+                st.kbmode = "sta";
+                mqtt_set(fk, val);
+                if (mqtt_cfg().on)
+                    system("/etc/init.d/almond3s-mqtt restart");
+                go_page("mqtt");
                 return;
             }
             draw_kbd_page();
@@ -10305,9 +10898,13 @@ function main() {
         let bar_t;
         bar_t = uloop_mod.timer(90, function() {
             if (bar_moving && st.screen == "active" &&
-                (st.page == "lte" || st.page == "cell")) {
+                (st.page == "lte" || st.page == "cell" || st.page == "dashboard" ||
+                 st.page == "zigbee" || st.page == "zigpeer")) {
                 bar_moving = false;
                 draw_current();
+            } else if (bar_moving && st.screen == "screensaver" && !st.blank) {
+                bar_moving = false;
+                draw_saver_tick();
             } else {
                 bar_moving = false;
             }
@@ -10363,7 +10960,7 @@ function main() {
                     // строк батарейки в кадре всего шестнадцать, так что
                     // перерисовка почти ничего не стоит.
                     anim_phase++;
-                    draw_screensaver();
+                    draw_saver_tick();
                 }
             }
             // Пока идёт тест скорости - тикаем чаще (плавная заливка).
@@ -10382,13 +10979,24 @@ function main() {
                 // ещё не прочитан, а сам процесс может и умереть - смотрим по
                 // свежести файла соседей, это дешевле опроса процессов.
                 st.zig_tick = (st.zig_tick ?? 99) + 1;
-                if (st.zig_tick >= 8) {
+                if (st.zig?.flashing && (time() - st.zig.flashing) > 20) {
+                    if (!fs.stat("/tmp/.zig_flashing")
+                        || (time() - st.zig.flashing) > 300) {
+                        st.zig.flashing = null;
+                        st.zig.flash_done = time();
+                        st.zig_tick = 99;
+                        zig_beacon_start();
+                    }
+                }
+                if (st.zig_tick >= 8 && !zig_busy() && !st.zig?.flashing
+                    && !fs.stat("/tmp/.zig_flashing")) {
                     st.zig_tick = 0;
                     let f = fs.stat(ZIG_PEERS);
                     if (!f || (time() - f.mtime) > 20) zig_beacon_start();
                 }
             }
             st.vpn_on = clash_running();
+            st.vpn_node = st.vpn_on ? (dash_vpn_now().node ?? "") : "";
             // Матрица-заставка: снизу живой logread (kmsg после буста молчит).
             // Срезаем дату+facility, режем по ширине, фоном чтоб не блокировать.
             if (st.saver_scene == 0)
@@ -10472,7 +11080,7 @@ function main() {
                                    fmt_bytes(length(hist.tx) > 0 ? hist.tx[length(hist.tx) - 1] : 0));
                 if (sig != st.saver_sig) {
                     st.saver_sig = sig;
-                    draw_screensaver();
+                    draw_saver_tick();
                 }
             }
             data_t.set(T.data * 1000);
@@ -10488,7 +11096,15 @@ function main() {
             if (t) {
                 term_null = 0;
                 st.ltch = time();
-                if (st.screen != "active")
+                bl_boost();
+                let dot = (st.screen == "screensaver" && !st.blank
+                           && saver_style() == "dash" && st.saver_scene == null)
+                         ? dash_dot_at(t.x, t.y) : -1;
+                if (dot >= 0) {
+                    dash_goto(dot);
+                    draw_saver_tick();
+                }
+                else if (st.screen != "active")
                     set_screen("active");
                 else if (!t.move || st.page == "iconedit" || st.page == "term") {
                     // Тачскрин резистивный и дребезжит: одно нажатие нередко
@@ -10539,6 +11155,12 @@ function main() {
                 st.toast = null;
                 if (st.screen == "active") draw_current();
             }
+            if (st.bl_boost && (time() - st.bl_boost) >= BL_BOOST_SEC) {
+                st.bl_boost = null;
+                if (!st.blank) backlight_write(true);
+            }
+            st.bl_tick = (st.bl_tick ?? 0) + 1;
+            if (st.bl_tick >= 10) { st.bl_tick = 0; bl_reassert(); }
             let idle = time() - st.ltch;
             if (st.screen == "active" && idle >= saver_timeout()
                 && !screen_keep_awake())
@@ -10610,7 +11232,7 @@ function main() {
                 draw_current();
                 st.ldraw = now;
             } else if (st.screen == "screensaver") {
-                draw_screensaver();
+                draw_saver_tick();
             }
 
             sock_poll(st.screen == "off" ? 500 : 100);
